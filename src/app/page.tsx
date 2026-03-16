@@ -1,9 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/label';
 import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
@@ -35,17 +34,205 @@ import {
   Save,
   X,
   Server,
-  FolderOpen,
+  Upload,
+  Download,
 } from 'lucide-react';
+
+// Simple SQL parser for MSSQL dump files
+function parseSQLDump(sql: string): { tables: Map<string, { columns: { name: string; type: string }[]; primaryKeys: string[]; rows: unknown[][] }> } {
+  const tables = new Map<string, { columns: { name: string; type: string }[]; primaryKeys: string[]; rows: unknown[][] }>();
+  
+  // Split by statements
+  const statements = sql.split(/;\s*\n/);
+  
+  for (const stmt of statements) {
+    const trimmed = stmt.trim();
+    if (!trimmed) continue;
+    
+    // Parse CREATE TABLE
+    if (trimmed.toUpperCase().startsWith('CREATE TABLE')) {
+      const match = trimmed.match(/CREATE\s+TABLE\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?\s*\(([\s\S]+)\)/i);
+      if (match) {
+        const tableName = match[1];
+        const columnsStr = match[2];
+        
+        const columns: { name: string; type: string }[] = [];
+        const primaryKeys: string[] = [];
+        
+        // Parse columns
+        const parts = columnsStr.split(/,\s*(?![^()]*\))/);
+        
+        for (const part of parts) {
+          const trimmedPart = part.trim();
+          
+          // Primary key constraint
+          if (trimmedPart.match(/PRIMARY\s+KEY\s*\((.+)\)/i)) {
+            const pkMatch = trimmedPart.match(/PRIMARY\s+KEY\s*\((.+)\)/i);
+            if (pkMatch) {
+              const pkCols = pkMatch[1].split(',').map(c => c.replace(/[\[\]]/g, '').trim());
+              primaryKeys.push(...pkCols);
+            }
+            continue;
+          }
+          
+          // Skip other constraints
+          if (trimmedPart.match(/^(CONSTRAINT|FOREIGN\s+KEY|UNIQUE|CHECK|DEFAULT|INDEX)/i)) {
+            continue;
+          }
+          
+          // Column definition
+          const colMatch = trimmedPart.match(/\[?(\w+)\]?\s+(\w+(?:\s*\([^)]+\))?)\s*(.*)/i);
+          if (colMatch) {
+            const colName = colMatch[1];
+            const colType = colMatch[2];
+            columns.push({ name: colName, type: colType });
+            
+            // Check for inline PRIMARY KEY
+            if (colMatch[3] && colMatch[3].toUpperCase().includes('PRIMARY KEY')) {
+              primaryKeys.push(colName);
+            }
+          }
+        }
+        
+        tables.set(tableName, { columns, primaryKeys, rows: [] });
+      }
+    }
+    
+    // Parse INSERT
+    if (trimmed.toUpperCase().startsWith('INSERT INTO')) {
+      const match = trimmed.match(/INSERT\s+INTO\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?\s*(?:\(([^)]+)\))?\s*VALUES\s*\(([\s\S]+)\)/i);
+      if (match) {
+        const tableName = match[1];
+        const valuesStr = match[3];
+        
+        // Parse values
+        const values = parseValues(valuesStr);
+        
+        let table = tables.get(tableName);
+        if (!table) {
+          // Create table from insert
+          table = { 
+            columns: values.map((_, i) => ({ name: `column_${i}`, type: 'TEXT' })),
+            primaryKeys: [],
+            rows: []
+          };
+          tables.set(tableName, table);
+        }
+        
+        table.rows.push(values);
+      }
+    }
+  }
+  
+  return { tables };
+}
+
+// Parse values from INSERT statement
+function parseValues(str: string): unknown[] {
+  const values: unknown[] = [];
+  let current = '';
+  let inString = false;
+  let stringChar = '';
+  let depth = 0;
+  
+  for (let i = 0; i < str.length; i++) {
+    const char = str[i];
+    const prevChar = i > 0 ? str[i - 1] : '';
+    
+    // Handle string literals
+    if ((char === "'" || char === '"') && prevChar !== '\\') {
+      if (!inString) {
+        inString = true;
+        stringChar = char;
+        continue;
+      } else if (char === stringChar) {
+        // Check for escaped quote
+        if (str[i + 1] === stringChar) {
+          current += char;
+          continue;
+        }
+        inString = false;
+        continue;
+      }
+    }
+    
+    if (!inString) {
+      if (char === '(') depth++;
+      if (char === ')') depth--;
+      
+      if (char === ',' && depth === 0) {
+        values.push(parseValue(current.trim()));
+        current = '';
+        continue;
+      }
+    }
+    
+    current += char;
+  }
+  
+  if (current.trim()) {
+    values.push(parseValue(current.trim()));
+  }
+  
+  return values;
+}
+
+// Parse a single value
+function parseValue(str: string): unknown {
+  if (str === 'NULL' || str === 'null') return null;
+  
+  // String value
+  if ((str.startsWith("'") && str.endsWith("'")) || (str.startsWith('"') && str.endsWith('"'))) {
+    return str.slice(1, -1).replace(/''/g, "'").replace(/\\"/g, '"');
+  }
+  
+  // Number
+  if (/^-?\d+$/.test(str)) return parseInt(str, 10);
+  if (/^-?\d+\.\d+$/.test(str)) return parseFloat(str);
+  
+  // Boolean
+  if (str.toLowerCase() === 'true') return true;
+  if (str.toLowerCase() === 'false') return false;
+  
+  return str;
+}
+
+// MSSQL to SQLite type mapping
+function mssqlToSqliteType(mssqlType: string): string {
+  const type = mssqlType.toUpperCase();
+  if (type.includes('INT')) return 'INTEGER';
+  if (type.includes('CHAR') || type.includes('TEXT') || type.includes('VARCHAR')) return 'TEXT';
+  if (type.includes('DECIMAL') || type.includes('NUMERIC') || type.includes('FLOAT') || type.includes('REAL') || type.includes('MONEY')) return 'REAL';
+  if (type.includes('DATE') || type.includes('TIME')) return 'TEXT';
+  if (type === 'BIT') return 'INTEGER';
+  return 'TEXT';
+}
+
+// MSSQL to MySQL type mapping
+function mssqlToMysqlType(mssqlType: string): string {
+  const type = mssqlType.toUpperCase();
+  if (type === 'BIGINT') return 'BIGINT';
+  if (type === 'INT' || type === 'INTEGER') return 'INT';
+  if (type === 'SMALLINT') return 'SMALLINT';
+  if (type === 'TINYINT') return 'TINYINT';
+  if (type === 'BIT') return 'BOOLEAN';
+  if (type.includes('DECIMAL') || type.includes('NUMERIC')) return 'DECIMAL(18,4)';
+  if (type === 'MONEY' || type === 'SMALLMONEY') return 'DECIMAL(19,4)';
+  if (type === 'FLOAT') return 'DOUBLE';
+  if (type === 'REAL') return 'FLOAT';
+  if (type.includes('DATETIME')) return 'DATETIME';
+  if (type === 'DATE') return 'DATE';
+  if (type === 'TIME') return 'TIME';
+  if (type.includes('VARCHAR') || type.includes('NVARCHAR')) return 'VARCHAR(255)';
+  if (type.includes('CHAR') || type.includes('NCHAR')) return 'CHAR(255)';
+  if (type === 'NTEXT' || type === 'TEXT') return 'LONGTEXT';
+  if (type === 'UNIQUEIDENTIFIER') return 'CHAR(36)';
+  return 'TEXT';
+}
 
 interface TableSchema {
   name: string;
-  columns: {
-    name: string;
-    type: string;
-    nullable: boolean;
-    defaultValue: string | null;
-  }[];
+  columns: { name: string; type: string; nullable: boolean }[];
   primaryKeys: string[];
 }
 
@@ -57,19 +244,14 @@ interface TableData {
   totalPages: number;
 }
 
-interface MigrationResult {
-  table: string;
-  status: 'success' | 'error';
-  rowsMigrated?: number;
-  error?: string;
-}
-
 export default function SQLFileManager() {
-  // SQL File states
-  const [sqlFilePath, setSqlFilePath] = useState('/path/to/your/file.sql');
+  // File states
+  const [fileName, setFileName] = useState<string>('');
   const [parsing, setParsing] = useState(false);
-  const [parseProgress, setParseProgress] = useState('');
+  const [parseProgress, setParseProgress] = useState({ percent: 0, message: '' });
   const [tables, setTables] = useState<string[]>([]);
+  const [tableSchemas, setTableSchemas] = useState<Map<string, TableSchema>>(new Map());
+  const [tableRows, setTableRows] = useState<Map<string, unknown[][]>>(new Map());
   const [dbReady, setDbReady] = useState(false);
   
   // Data viewer states
@@ -82,14 +264,14 @@ export default function SQLFileManager() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editMode, setEditMode] = useState<'edit' | 'add'>('edit');
   const [editingRow, setEditingRow] = useState<Record<string, unknown>>({});
-  const [primaryKeyValues, setPrimaryKeyValues] = useState<Record<string, unknown>>({});
+  const [rowIndex, setRowIndex] = useState<number>(-1);
   
   // MySQL connection for migration
   const [mysqlConfig, setMysqlConfig] = useState({
-    host: 'localhost',
+    host: '',
     port: 3306,
     database: '',
-    user: 'root',
+    user: '',
     password: '',
   });
   
@@ -97,85 +279,124 @@ export default function SQLFileManager() {
   const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
   const [selectedTablesForMigration, setSelectedTablesForMigration] = useState<string[]>([]);
   const [migrating, setMigrating] = useState(false);
-  const [migrationResults, setMigrationResults] = useState<MigrationResult[] | null>(null);
+  const [migrationResults, setMigrationResults] = useState<{ table: string; status: string; sql: string }[] | null>(null);
   
-  // Check if database is already loaded
-  const checkDatabase = async () => {
-    try {
-      const response = await fetch('/api/sql-file/parse');
-      const data = await response.json();
-      
-      if (data.ready) {
-        setTables(data.tables);
-        setDbReady(true);
-      }
-    } catch (error) {
-      console.error('Failed to check database:', error);
-    }
-  };
-  
-  // Parse SQL file
-  const parseSQLFile = async () => {
-    if (!sqlFilePath) return;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Handle file selection
+  const handleFileSelect = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
     
+    setFileName(file.name);
     setParsing(true);
-    setParseProgress('Starting to parse SQL file...');
+    setParseProgress({ percent: 0, message: 'Reading file...' });
     
     try {
-      const response = await fetch('/api/sql-file/parse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filePath: sqlFilePath }),
-      });
+      // Read file in chunks
+      const chunkSize = 10 * 1024 * 1024; // 10MB chunks
+      const fileSize = file.size;
+      let offset = 0;
+      let sqlContent = '';
       
-      const data = await response.json();
+      const reader = new FileReader();
       
-      if (data.success) {
-        setTables(data.tables);
-        setDbReady(true);
-        setParseProgress(`Successfully parsed! Found ${data.tables.length} tables.`);
-      } else {
-        setParseProgress(`Error: ${data.error}`);
+      const readChunk = (start: number): Promise<string> => {
+        return new Promise((resolve, reject) => {
+          const end = Math.min(start + chunkSize, fileSize);
+          const blob = file.slice(start, end);
+          
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsText(blob);
+        });
+      };
+      
+      while (offset < fileSize) {
+        const chunk = await readChunk(offset);
+        sqlContent += chunk;
+        offset += chunkSize;
+        
+        const percent = Math.round((offset / fileSize) * 50);
+        setParseProgress({ percent, message: `Reading file... ${Math.round(offset / 1024 / 1024)}MB / ${Math.round(fileSize / 1024 / 1024)}MB` });
       }
+      
+      setParseProgress({ percent: 50, message: 'Parsing SQL statements...' });
+      
+      // Parse SQL
+      const result = parseSQLDump(sqlContent);
+      
+      setParseProgress({ percent: 90, message: 'Processing tables...' });
+      
+      // Convert to our format
+      const tableNames: string[] = [];
+      const schemas = new Map<string, TableSchema>();
+      const rows = new Map<string, unknown[][]>();
+      
+      for (const [tableName, table] of result.tables) {
+        tableNames.push(tableName);
+        
+        schemas.set(tableName, {
+          name: tableName,
+          columns: table.columns.map(col => ({
+            name: col.name,
+            type: col.type,
+            nullable: true,
+          })),
+          primaryKeys: table.primaryKeys,
+        });
+        
+        rows.set(tableName, table.rows);
+      }
+      
+      setTables(tableNames.sort());
+      setTableSchemas(schemas);
+      setTableRows(rows);
+      setDbReady(true);
+      setParseProgress({ percent: 100, message: `Complete! Found ${tableNames.length} tables.` });
+      
     } catch (error) {
-      setParseProgress(`Error: ${error instanceof Error ? error.message : 'Failed to parse'}`);
+      setParseProgress({ percent: 0, message: `Error: ${error instanceof Error ? error.message : 'Failed to parse'}` });
     } finally {
       setParsing(false);
     }
-  };
+  }, []);
   
   // Load table data
-  const loadTableData = async (tableName: string, page: number = 1) => {
+  const loadTableData = (tableName: string, page: number = 1) => {
     setLoadingData(true);
     setSelectedTable(tableName);
     
-    try {
-      // Get schema
-      const schemaResponse = await fetch('/api/sql-file/tables', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tableName }),
-      });
-      const schemaData = await schemaResponse.json();
-      if (schemaData.success) {
-        setTableSchema(schemaData.schema);
-      }
+    const schema = tableSchemas.get(tableName);
+    const rows = tableRows.get(tableName) || [];
+    
+    if (schema) {
+      setTableSchema(schema);
       
-      // Get data
-      const dataResponse = await fetch('/api/sql-file/data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tableName, page, pageSize: 50 }),
+      const pageSize = 50;
+      const start = (page - 1) * pageSize;
+      const end = start + pageSize;
+      const pageRows = rows.slice(start, end);
+      
+      // Convert rows to objects
+      const data = pageRows.map(row => {
+        const obj: Record<string, unknown> = {};
+        schema.columns.forEach((col, i) => {
+          obj[col.name] = row[i];
+        });
+        return obj;
       });
-      const dataData = await dataResponse.json();
-      if (dataData.success) {
-        setTableData(dataData);
-      }
-    } catch (error) {
-      console.error('Failed to load table data:', error);
-    } finally {
-      setLoadingData(false);
+      
+      setTableData({
+        data,
+        total: rows.length,
+        page,
+        pageSize,
+        totalPages: Math.ceil(rows.length / pageSize),
+      });
     }
+    
+    setLoadingData(false);
   };
   
   // Handle page change
@@ -186,96 +407,49 @@ export default function SQLFileManager() {
   };
   
   // Open edit dialog
-  const openEditDialog = (row: Record<string, unknown>, mode: 'edit' | 'add' = 'edit') => {
+  const openEditDialog = (row: Record<string, unknown>, idx: number, mode: 'edit' | 'add' = 'edit') => {
     if (!tableSchema) return;
     
     setEditMode(mode);
     setEditingRow({ ...row });
-    
-    if (mode === 'edit' && tableSchema.primaryKeys.length > 0) {
-      const pkValues: Record<string, unknown> = {};
-      tableSchema.primaryKeys.forEach(pk => {
-        pkValues[pk] = row[pk];
-      });
-      setPrimaryKeyValues(pkValues);
-    } else {
-      setPrimaryKeyValues({});
-    }
-    
+    setRowIndex(idx);
     setEditDialogOpen(true);
   };
   
   // Save row changes
-  const saveRowChanges = async () => {
-    if (!selectedTable || !tableSchema) return;
+  const saveRowChanges = () => {
+    if (!selectedTable || !tableSchema || !tableData) return;
     
-    try {
-      const action = editMode === 'add' ? 'insert' : 'update';
-      const body: Record<string, unknown> = {
-        tableName: selectedTable,
-        action,
-        data: editingRow,
-      };
-      
-      if (editMode === 'edit') {
-        body.primaryKey = primaryKeyValues;
-      }
-      
-      const response = await fetch('/api/sql-file/edit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        setEditDialogOpen(false);
-        loadTableData(selectedTable, tableData?.page || 1);
-      } else {
-        alert(data.error || data.message);
-      }
-    } catch (error) {
-      alert(error instanceof Error ? error.message : 'Failed to save');
+    const rows = tableRows.get(selectedTable) || [];
+    
+    if (editMode === 'add') {
+      // Add new row
+      const newRow = tableSchema.columns.map(col => editingRow[col.name]);
+      rows.push(newRow);
+    } else {
+      // Update existing row
+      const actualIndex = (tableData.page - 1) * tableData.pageSize + rowIndex;
+      const updatedRow = tableSchema.columns.map(col => editingRow[col.name]);
+      rows[actualIndex] = updatedRow;
     }
+    
+    setTableRows(new Map(tableRows).set(selectedTable, rows));
+    setEditDialogOpen(false);
+    loadTableData(selectedTable, tableData.page);
   };
   
   // Delete row
-  const deleteRow = async (row: Record<string, unknown>) => {
-    if (!selectedTable || !tableSchema) return;
-    if (tableSchema.primaryKeys.length === 0) {
-      alert('Cannot delete: No primary key defined for this table');
-      return;
-    }
+  const deleteRow = (row: Record<string, unknown>, idx: number) => {
+    if (!selectedTable || !tableData) return;
     
     if (!confirm('Are you sure you want to delete this row?')) return;
     
-    const pkValues: Record<string, unknown> = {};
-    tableSchema.primaryKeys.forEach(pk => {
-      pkValues[pk] = row[pk];
-    });
+    const rows = tableRows.get(selectedTable) || [];
+    const actualIndex = (tableData.page - 1) * tableData.pageSize + idx;
+    rows.splice(actualIndex, 1);
     
-    try {
-      const response = await fetch('/api/sql-file/edit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tableName: selectedTable,
-          action: 'delete',
-          primaryKey: pkValues,
-        }),
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        loadTableData(selectedTable, tableData?.page || 1);
-      } else {
-        alert(data.error || data.message);
-      }
-    } catch (error) {
-      alert(error instanceof Error ? error.message : 'Failed to delete');
-    }
+    setTableRows(new Map(tableRows).set(selectedTable, rows));
+    loadTableData(selectedTable, tableData.page);
   };
   
   // Toggle table selection for migration
@@ -287,51 +461,88 @@ export default function SQLFileManager() {
     );
   };
   
-  // Select all tables for migration
+  // Select all tables
   const selectAllTables = () => {
     setSelectedTablesForMigration([...tables]);
   };
   
-  // Deselect all tables for migration
+  // Deselect all tables
   const deselectAllTables = () => {
     setSelectedTablesForMigration([]);
   };
   
-  // Run migration
-  const runMigration = async () => {
+  // Generate MySQL export SQL
+  const generateMySQLExport = () => {
     if (selectedTablesForMigration.length === 0) return;
     
-    setMigrating(true);
-    setMigrationResults(null);
+    const results: { table: string; status: string; sql: string }[] = [];
     
-    try {
-      const response = await fetch('/api/sql-file/migrate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mysqlConfig,
-          tables: selectedTablesForMigration,
-        }),
-      });
+    for (const tableName of selectedTablesForMigration) {
+      const schema = tableSchemas.get(tableName);
+      const rows = tableRows.get(tableName) || [];
       
-      const data = await response.json();
+      if (!schema) continue;
       
-      if (data.success) {
-        setMigrationResults(data.results);
-      } else {
-        alert(data.error);
+      try {
+        // Generate CREATE TABLE
+        const columnDefs = schema.columns.map(col => {
+          const mysqlType = mssqlToMysqlType(col.type);
+          return `\`${col.name}\` ${mysqlType}`;
+        });
+        
+        const pkDef = schema.primaryKeys.length > 0
+          ? `, PRIMARY KEY (${schema.primaryKeys.map(pk => `\`${pk}\``).join(', ')})`
+          : '';
+        
+        const createSQL = `DROP TABLE IF EXISTS \`${tableName}\`;\nCREATE TABLE \`${tableName}\` (\n  ${columnDefs.join(',\n  ')}${pkDef}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`;
+        
+        // Generate INSERT statements
+        const insertStatements: string[] = [];
+        const colNames = schema.columns.map(c => `\`${c.name}\``).join(', ');
+        
+        for (const row of rows) {
+          const values = row.map(val => {
+            if (val === null) return 'NULL';
+            if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`;
+            if (typeof val === 'number') return val.toString();
+            return `'${val}'`;
+          }).join(', ');
+          
+          insertStatements.push(`INSERT INTO \`${tableName}\` (${colNames}) VALUES (${values});`);
+        }
+        
+        results.push({
+          table: tableName,
+          status: 'success',
+          sql: `${createSQL}\n\n${insertStatements.join('\n')}`,
+        });
+      } catch (error) {
+        results.push({
+          table: tableName,
+          status: 'error',
+          sql: `-- Error: ${error}`,
+        });
       }
-    } catch (error) {
-      alert(error instanceof Error ? error.message : 'Migration failed');
-    } finally {
-      setMigrating(false);
     }
+    
+    setMigrationResults(results);
   };
   
-  // Check database on mount
-  useEffect(() => {
-    checkDatabase();
-  }, []);
+  // Download MySQL export
+  const downloadExport = () => {
+    if (!migrationResults || migrationResults.length === 0) return;
+    
+    const fullSQL = migrationResults.map(r => r.sql).join('\n\n-- ----------------------------------------\n\n');
+    const blob = new Blob([fullSQL], { type: 'text/sql' });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'mysql_export.sql';
+    a.click();
+    
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
@@ -347,7 +558,7 @@ export default function SQLFileManager() {
                 SQL File Manager
               </h1>
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                Open, view, edit MSSQL .sql dump files and migrate to MySQL
+                Open, view, edit MSSQL .sql dump files and export to MySQL
               </p>
             </div>
           </div>
@@ -355,56 +566,50 @@ export default function SQLFileManager() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* SQL File Input Section */}
+        {/* File Upload Section */}
         <Card className="mb-6">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <FolderOpen className="h-5 w-5 text-blue-600" />
-              Open SQL File
+              <Upload className="h-5 w-5 text-blue-600" />
+              Upload SQL File
             </CardTitle>
             <CardDescription>
-              Enter the path to your MSSQL .sql dump file on the server (e.g., /home/user/backup.sql)
+              Select your MSSQL .sql dump file from your computer (supports large files)
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex gap-4">
-              <div className="flex-1">
-                <Label htmlFor="sql-path">SQL File Path</Label>
-                <input
-                  id="sql-path"
-                  type="text"
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                  value={sqlFilePath}
-                  onChange={(e) => setSqlFilePath(e.target.value)}
-                  placeholder="/path/to/your/file.sql"
-                />
-              </div>
-              <div className="flex items-end">
-                <Button 
-                  onClick={parseSQLFile} 
-                  disabled={parsing || !sqlFilePath}
-                  className="min-w-32"
-                >
-                  {parsing ? (
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  ) : (
-                    <Play className="h-4 w-4 mr-2" />
-                  )}
-                  Parse File
-                </Button>
-              </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".sql,.txt"
+              onChange={handleFileSelect}
+              className="hidden"
+            />
+            
+            <div 
+              className="border-2 border-dashed rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 transition-colors"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <FileUp className="h-12 w-12 mx-auto mb-4 text-slate-400" />
+              <p className="text-lg font-medium text-slate-700 dark:text-slate-300 mb-2">
+                Click to select SQL file
+              </p>
+              <p className="text-sm text-slate-500">
+                {fileName || 'Supports .sql files (MSSQL dump format)'}
+              </p>
             </div>
             
-            {parseProgress && (
-              <div className={`p-3 rounded-lg ${parseProgress.includes('Error') ? 'bg-red-50 dark:bg-red-950/30 text-red-600' : 'bg-green-50 dark:bg-green-950/30 text-green-600'}`}>
-                {parseProgress}
+            {parsing && (
+              <div className="space-y-2">
+                <Progress value={parseProgress.percent} />
+                <p className="text-sm text-center text-muted-foreground">{parseProgress.message}</p>
               </div>
             )}
             
-            {dbReady && (
+            {dbReady && !parsing && (
               <div className="flex items-center gap-2 text-green-600">
                 <CheckCircle2 className="h-5 w-5" />
-                <span>Database loaded with {tables.length} tables</span>
+                <span>Loaded {tables.length} tables from {fileName}</span>
               </div>
             )}
           </CardContent>
@@ -423,26 +628,30 @@ export default function SQLFileManager() {
                     size="sm"
                     onClick={() => setMigrationDialogOpen(true)}
                   >
-                    <ArrowRight className="h-4 w-4 mr-1" />
-                    Migrate
+                    <Download className="h-4 w-4 mr-1" />
+                    Export
                   </Button>
                 </div>
               </CardHeader>
               <CardContent className="p-0">
                 <ScrollArea className="h-[500px]">
                   <div className="p-2 space-y-1">
-                    {tables.map((table) => (
-                      <Button
-                        key={table}
-                        variant={selectedTable === table ? 'default' : 'ghost'}
-                        size="sm"
-                        className="w-full justify-start"
-                        onClick={() => loadTableData(table)}
-                      >
-                        <Table2 className="h-4 w-4 mr-2 text-blue-600" />
-                        {table}
-                      </Button>
-                    ))}
+                    {tables.map((table) => {
+                      const rowCount = tableRows.get(table)?.length || 0;
+                      return (
+                        <Button
+                          key={table}
+                          variant={selectedTable === table ? 'default' : 'ghost'}
+                          size="sm"
+                          className="w-full justify-start"
+                          onClick={() => loadTableData(table)}
+                        >
+                          <Table2 className="h-4 w-4 mr-2 text-blue-600" />
+                          <span className="truncate flex-1 text-left">{table}</span>
+                          <Badge variant="secondary" className="ml-1">{rowCount}</Badge>
+                        </Button>
+                      );
+                    })}
                   </div>
                 </ScrollArea>
               </CardContent>
@@ -474,7 +683,7 @@ export default function SQLFileManager() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => openEditDialog({}, 'add')}
+                        onClick={() => openEditDialog({}, -1, 'add')}
                       >
                         <Plus className="h-4 w-4 mr-1" />
                         Add Row
@@ -532,14 +741,14 @@ export default function SQLFileManager() {
                                   <Button
                                     variant="ghost"
                                     size="icon"
-                                    onClick={() => openEditDialog(row, 'edit')}
+                                    onClick={() => openEditDialog(row, rowIndex, 'edit')}
                                   >
                                     <Edit2 className="h-4 w-4" />
                                   </Button>
                                   <Button
                                     variant="ghost"
                                     size="icon"
-                                    onClick={() => deleteRow(row)}
+                                    onClick={() => deleteRow(row, rowIndex)}
                                   >
                                     <Trash2 className="h-4 w-4 text-red-500" />
                                   </Button>
@@ -603,28 +812,28 @@ export default function SQLFileManager() {
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
-                  <h4 className="font-semibold mb-2">1. Enter SQL File Path</h4>
+                  <h4 className="font-semibold mb-2">1. Upload SQL File</h4>
                   <p className="text-sm text-muted-foreground">
-                    Provide the full path to your MSSQL .sql dump file on the server.
-                    For example: <code className="text-xs bg-slate-100 dark:bg-slate-800 px-1 rounded">/home/user/backup.sql</code>
+                    Click the upload area and select your MSSQL .sql dump file from your computer.
+                    Large files (900MB+) are supported.
                   </p>
                 </div>
                 <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
-                  <h4 className="font-semibold mb-2">2. Parse & View Data</h4>
+                  <h4 className="font-semibold mb-2">2. View & Edit Data</h4>
                   <p className="text-sm text-muted-foreground">
-                    Click "Parse File" to extract tables and data. Large files (900MB+) will be processed efficiently.
+                    Browse tables, view data with pagination, add, edit, or delete rows.
                   </p>
                 </div>
                 <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
-                  <h4 className="font-semibold mb-2">3. Edit Data</h4>
+                  <h4 className="font-semibold mb-2">3. Export to MySQL</h4>
                   <p className="text-sm text-muted-foreground">
-                    View, add, edit, or delete rows in any table. Changes are stored locally.
+                    Click "Export" to generate MySQL-compatible SQL statements for migration.
                   </p>
                 </div>
                 <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
-                  <h4 className="font-semibold mb-2">4. Migrate to MySQL</h4>
+                  <h4 className="font-semibold mb-2">4. Download Export</h4>
                   <p className="text-sm text-muted-foreground">
-                    Connect to your MySQL database and migrate selected tables with automatic schema conversion.
+                    Download the generated MySQL SQL file and run it on your MySQL server.
                   </p>
                 </div>
               </div>
@@ -656,19 +865,19 @@ export default function SQLFileManager() {
                     {col.name}
                     {isPrimaryKey && <Badge variant="secondary" className="ml-2">PK</Badge>}
                     <span className="text-xs text-muted-foreground ml-2">
-                      ({col.type}{!col.nullable ? ', NOT NULL' : ''})
+                      ({col.type})
                     </span>
                   </Label>
                   <input
                     id={`edit-${col.name}`}
-                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                     value={editingRow[col.name]?.toString() || ''}
                     onChange={(e) => setEditingRow({ 
                       ...editingRow, 
                       [col.name]: e.target.value 
                     })}
                     disabled={editMode === 'edit' && isPrimaryKey}
-                    placeholder={col.nullable ? 'NULL' : ''}
+                    placeholder="NULL"
                   />
                 </div>
               );
@@ -688,70 +897,17 @@ export default function SQLFileManager() {
         </DialogContent>
       </Dialog>
       
-      {/* Migration Dialog */}
+      {/* Export Dialog */}
       <Dialog open={migrationDialogOpen} onOpenChange={setMigrationDialogOpen}>
         <DialogContent className="max-w-3xl max-h-[80vh]">
           <DialogHeader>
-            <DialogTitle>Migrate to MySQL</DialogTitle>
+            <DialogTitle>Export to MySQL</DialogTitle>
             <DialogDescription>
-              Select tables to migrate from your SQL file to MySQL database
+              Select tables to export as MySQL-compatible SQL statements
             </DialogDescription>
           </DialogHeader>
           
           <div className="space-y-4 py-4">
-            {/* MySQL Connection */}
-            <div className="border rounded-lg p-4">
-              <h4 className="font-semibold mb-3 flex items-center gap-2">
-                <Server className="h-4 w-4" />
-                MySQL Connection
-              </h4>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label>Host</Label>
-                  <input
-                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={mysqlConfig.host}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, host: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <Label>Port</Label>
-                  <input
-                    type="number"
-                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={mysqlConfig.port}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, port: parseInt(e.target.value) || 3306 })}
-                  />
-                </div>
-                <div className="col-span-2">
-                  <Label>Database</Label>
-                  <input
-                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={mysqlConfig.database}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, database: e.target.value })}
-                    placeholder="database_name"
-                  />
-                </div>
-                <div>
-                  <Label>Username</Label>
-                  <input
-                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={mysqlConfig.user}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, user: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <Label>Password</Label>
-                  <input
-                    type="password"
-                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    value={mysqlConfig.password}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, password: e.target.value })}
-                  />
-                </div>
-              </div>
-            </div>
-            
             {/* Table Selection */}
             <div>
               <div className="flex items-center justify-between mb-2">
@@ -780,16 +936,23 @@ export default function SQLFileManager() {
                       />
                       <Table2 className="h-4 w-4 text-blue-600" />
                       <span>{table}</span>
+                      <Badge variant="secondary">{tableRows.get(table)?.length || 0} rows</Badge>
                     </label>
                   ))}
                 </div>
               </ScrollArea>
             </div>
             
-            {/* Migration Results */}
+            {/* Results */}
             {migrationResults && (
               <div className="border rounded-lg p-4 bg-slate-50 dark:bg-slate-800">
-                <h4 className="font-semibold mb-2">Migration Results</h4>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="font-semibold">Export Ready</h4>
+                  <Button onClick={downloadExport} size="sm">
+                    <Download className="h-4 w-4 mr-1" />
+                    Download SQL File
+                  </Button>
+                </div>
                 <ScrollArea className="h-32">
                   <div className="space-y-2">
                     {migrationResults.map((result) => (
@@ -807,9 +970,6 @@ export default function SQLFileManager() {
                           <XCircle className="h-4 w-4" />
                         )}
                         <span className="font-medium">{result.table}</span>
-                        {result.error && (
-                          <span className="text-sm">- {result.error}</span>
-                        )}
                       </div>
                     ))}
                   </div>
@@ -823,16 +983,12 @@ export default function SQLFileManager() {
               Close
             </Button>
             <Button
-              onClick={runMigration}
-              disabled={migrating || selectedTablesForMigration.length === 0 || !mysqlConfig.database}
+              onClick={generateMySQLExport}
+              disabled={selectedTablesForMigration.length === 0}
               className="bg-gradient-to-r from-blue-500 to-purple-600"
             >
-              {migrating ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <ArrowRight className="h-4 w-4 mr-2" />
-              )}
-              Start Migration
+              <ArrowRight className="h-4 w-4 mr-2" />
+              Generate MySQL Export
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -842,7 +998,7 @@ export default function SQLFileManager() {
       <footer className="mt-auto border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <p className="text-center text-sm text-slate-500 dark:text-slate-400">
-            SQL File Manager - Open, view, edit MSSQL dump files and migrate to MySQL
+            SQL File Manager - Open, view, edit MSSQL dump files and export to MySQL
           </p>
         </div>
       </footer>

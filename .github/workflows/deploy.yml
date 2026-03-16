@@ -1,4 +1,4 @@
-name: Build and Deploy to FTP
+name: Build and Deploy Static Site
 
 on:
   push:
@@ -10,7 +10,7 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -23,35 +23,8 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build application
+      - name: Build static site
         run: bun run build
-
-      - name: Create deployment package
-        run: |
-          mkdir -p deploy
-          cp -r .next/standalone/* deploy/
-          cp -r .next/static deploy/.next/
-          cp -r public deploy/
-          cp package.json deploy/
-
-      - name: Create ecosystem.config.js for PM2
-        run: |
-          cat > deploy/ecosystem.config.js << 'EOF'
-          module.exports = {
-            apps: [{
-              name: 'mssql-manager',
-              script: 'server.js',
-              instances: 1,
-              autorestart: true,
-              watch: false,
-              max_memory_restart: '1G',
-              env: {
-                NODE_ENV: 'production',
-                PORT: 3000
-              }
-            }]
-          };
-          EOF
 
       - name: Deploy to FTP
         uses: SamKirkland/FTP-Deploy-Action@4.3.0
@@ -59,9 +32,6 @@ jobs:
           server: ${{ secrets.FTP_HOST }}
           username: ${{ secrets.FTP_USER }}
           password: ${{ secrets.FTP_PASS }}
-          protocol: ftp
-          port: 21
-          local-dir: ./deploy/
-          server-dir: /mssql/
+          local-dir: ./out/
+          server-dir: ./
           dangerous-clean-slate: true
-          log-level: verbose
