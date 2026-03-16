@@ -1,14 +1,12 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { Input } from '@/components/ui/label';
 import { Label } from '@/components/ui/label';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
@@ -18,9 +16,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Progress } from '@/components/ui/progress';
 import {
+  FileUp,
   Database,
-  Server,
   Table2,
   Play,
   RefreshCw,
@@ -35,23 +34,19 @@ import {
   ChevronRight,
   Save,
   X,
+  Server,
+  FolderOpen,
 } from 'lucide-react';
 
-interface ConnectionConfig {
-  mssql: {
-    server: string;
-    port: number;
-    database: string;
-    user: string;
-    password: string;
-  } | null;
-  mysql: {
-    host: string;
-    port: number;
-    database: string;
-    user: string;
-    password: string;
-  } | null;
+interface TableSchema {
+  name: string;
+  columns: {
+    name: string;
+    type: string;
+    nullable: boolean;
+    defaultValue: string | null;
+  }[];
+  primaryKeys: string[];
 }
 
 interface TableData {
@@ -62,11 +57,6 @@ interface TableData {
   totalPages: number;
 }
 
-interface TableSchema {
-  columns: { COLUMN_NAME: string; DATA_TYPE: string; IS_NULLABLE: string }[];
-  primaryKeys: string[];
-}
-
 interface MigrationResult {
   table: string;
   status: 'success' | 'error';
@@ -74,35 +64,18 @@ interface MigrationResult {
   error?: string;
 }
 
-export default function DatabaseManager() {
-  // Connection states
-  const [mssqlConfig, setMssqlConfig] = useState({
-    server: 'localhost',
-    port: 1433,
-    database: '',
-    user: 'sa',
-    password: '',
-  });
-  
-  const [mysqlConfig, setMysqlConfig] = useState({
-    host: 'localhost',
-    port: 3306,
-    database: '',
-    user: 'root',
-    password: '',
-  });
-  
-  const [mssqlTables, setMssqlTables] = useState<string[]>([]);
-  const [mysqlTables, setMysqlTables] = useState<string[]>([]);
-  const [mssqlConnected, setMssqlConnected] = useState(false);
-  const [mysqlConnected, setMysqlConnected] = useState(false);
+export default function SQLFileManager() {
+  // SQL File states
+  const [sqlFilePath, setSqlFilePath] = useState('/path/to/your/file.sql');
+  const [parsing, setParsing] = useState(false);
+  const [parseProgress, setParseProgress] = useState('');
+  const [tables, setTables] = useState<string[]>([]);
+  const [dbReady, setDbReady] = useState(false);
   
   // Data viewer states
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
-  const [selectedDbType, setSelectedDbType] = useState<'mssql' | 'mysql' | null>(null);
   const [tableData, setTableData] = useState<TableData | null>(null);
   const [tableSchema, setTableSchema] = useState<TableSchema | null>(null);
-  const [loadingTables, setLoadingTables] = useState(false);
   const [loadingData, setLoadingData] = useState(false);
   
   // Edit states
@@ -111,88 +84,77 @@ export default function DatabaseManager() {
   const [editingRow, setEditingRow] = useState<Record<string, unknown>>({});
   const [primaryKeyValues, setPrimaryKeyValues] = useState<Record<string, unknown>>({});
   
+  // MySQL connection for migration
+  const [mysqlConfig, setMysqlConfig] = useState({
+    host: 'localhost',
+    port: 3306,
+    database: '',
+    user: 'root',
+    password: '',
+  });
+  
   // Migration states
   const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
   const [selectedTablesForMigration, setSelectedTablesForMigration] = useState<string[]>([]);
   const [migrating, setMigrating] = useState(false);
   const [migrationResults, setMigrationResults] = useState<MigrationResult[] | null>(null);
   
-  // Error states
-  const [mssqlError, setMssqlError] = useState<string | null>(null);
-  const [mysqlError, setMysqlError] = useState<string | null>(null);
-
-  // Connect to MSSQL
-  const connectMssql = async () => {
-    setLoadingTables(true);
-    setMssqlError(null);
-    
+  // Check if database is already loaded
+  const checkDatabase = async () => {
     try {
-      const response = await fetch('/api/database/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'mssql', config: mssqlConfig }),
-      });
-      
+      const response = await fetch('/api/sql-file/parse');
       const data = await response.json();
       
-      if (data.success) {
-        setMssqlTables(data.tables);
-        setMssqlConnected(true);
-      } else {
-        setMssqlError(data.error);
-        setMssqlConnected(false);
+      if (data.ready) {
+        setTables(data.tables);
+        setDbReady(true);
       }
     } catch (error) {
-      setMssqlError(error instanceof Error ? error.message : 'Connection failed');
-      setMssqlConnected(false);
-    } finally {
-      setLoadingTables(false);
+      console.error('Failed to check database:', error);
     }
   };
   
-  // Connect to MySQL
-  const connectMysql = async () => {
-    setLoadingTables(true);
-    setMysqlError(null);
+  // Parse SQL file
+  const parseSQLFile = async () => {
+    if (!sqlFilePath) return;
+    
+    setParsing(true);
+    setParseProgress('Starting to parse SQL file...');
     
     try {
-      const response = await fetch('/api/database/connect', {
+      const response = await fetch('/api/sql-file/parse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'mysql', config: mysqlConfig }),
+        body: JSON.stringify({ filePath: sqlFilePath }),
       });
       
       const data = await response.json();
       
       if (data.success) {
-        setMysqlTables(data.tables);
-        setMysqlConnected(true);
+        setTables(data.tables);
+        setDbReady(true);
+        setParseProgress(`Successfully parsed! Found ${data.tables.length} tables.`);
       } else {
-        setMysqlError(data.error);
-        setMysqlConnected(false);
+        setParseProgress(`Error: ${data.error}`);
       }
     } catch (error) {
-      setMysqlError(error instanceof Error ? error.message : 'Connection failed');
-      setMysqlConnected(false);
+      setParseProgress(`Error: ${error instanceof Error ? error.message : 'Failed to parse'}`);
     } finally {
-      setLoadingTables(false);
+      setParsing(false);
     }
   };
   
   // Load table data
-  const loadTableData = async (tableName: string, dbType: 'mssql' | 'mysql', page: number = 1) => {
+  const loadTableData = async (tableName: string, page: number = 1) => {
     setLoadingData(true);
     setSelectedTable(tableName);
-    setSelectedDbType(dbType);
     
     try {
-      const config = dbType === 'mssql' ? mssqlConfig : mysqlConfig;
-      
       // Get schema
-      const schemaResponse = await fetch('/api/database/tables', {
+      const schemaResponse = await fetch('/api/sql-file/tables', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: dbType, config, tableName }),
+        body: JSON.stringify({ tableName }),
       });
       const schemaData = await schemaResponse.json();
       if (schemaData.success) {
@@ -200,10 +162,10 @@ export default function DatabaseManager() {
       }
       
       // Get data
-      const dataResponse = await fetch('/api/database/data', {
+      const dataResponse = await fetch('/api/sql-file/data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: dbType, config, tableName, page, pageSize: 50 }),
+        body: JSON.stringify({ tableName, page, pageSize: 50 }),
       });
       const dataData = await dataResponse.json();
       if (dataData.success) {
@@ -218,8 +180,8 @@ export default function DatabaseManager() {
   
   // Handle page change
   const handlePageChange = (newPage: number) => {
-    if (selectedTable && selectedDbType) {
-      loadTableData(selectedTable, selectedDbType, newPage);
+    if (selectedTable) {
+      loadTableData(selectedTable, newPage);
     }
   };
   
@@ -245,15 +207,11 @@ export default function DatabaseManager() {
   
   // Save row changes
   const saveRowChanges = async () => {
-    if (!selectedTable || !selectedDbType || !tableSchema) return;
-    
-    const config = selectedDbType === 'mssql' ? mssqlConfig : mysqlConfig;
+    if (!selectedTable || !tableSchema) return;
     
     try {
       const action = editMode === 'add' ? 'insert' : 'update';
       const body: Record<string, unknown> = {
-        type: selectedDbType,
-        config,
         tableName: selectedTable,
         action,
         data: editingRow,
@@ -263,7 +221,7 @@ export default function DatabaseManager() {
         body.primaryKey = primaryKeyValues;
       }
       
-      const response = await fetch('/api/database/edit', {
+      const response = await fetch('/api/sql-file/edit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -273,9 +231,9 @@ export default function DatabaseManager() {
       
       if (data.success) {
         setEditDialogOpen(false);
-        loadTableData(selectedTable, selectedDbType, tableData?.page || 1);
+        loadTableData(selectedTable, tableData?.page || 1);
       } else {
-        alert(data.error);
+        alert(data.error || data.message);
       }
     } catch (error) {
       alert(error instanceof Error ? error.message : 'Failed to save');
@@ -284,7 +242,7 @@ export default function DatabaseManager() {
   
   // Delete row
   const deleteRow = async (row: Record<string, unknown>) => {
-    if (!selectedTable || !selectedDbType || !tableSchema) return;
+    if (!selectedTable || !tableSchema) return;
     if (tableSchema.primaryKeys.length === 0) {
       alert('Cannot delete: No primary key defined for this table');
       return;
@@ -292,19 +250,16 @@ export default function DatabaseManager() {
     
     if (!confirm('Are you sure you want to delete this row?')) return;
     
-    const config = selectedDbType === 'mssql' ? mssqlConfig : mysqlConfig;
     const pkValues: Record<string, unknown> = {};
     tableSchema.primaryKeys.forEach(pk => {
       pkValues[pk] = row[pk];
     });
     
     try {
-      const response = await fetch('/api/database/edit', {
+      const response = await fetch('/api/sql-file/edit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          type: selectedDbType,
-          config,
           tableName: selectedTable,
           action: 'delete',
           primaryKey: pkValues,
@@ -314,9 +269,9 @@ export default function DatabaseManager() {
       const data = await response.json();
       
       if (data.success) {
-        loadTableData(selectedTable, selectedDbType, tableData?.page || 1);
+        loadTableData(selectedTable, tableData?.page || 1);
       } else {
-        alert(data.error);
+        alert(data.error || data.message);
       }
     } catch (error) {
       alert(error instanceof Error ? error.message : 'Failed to delete');
@@ -334,7 +289,7 @@ export default function DatabaseManager() {
   
   // Select all tables for migration
   const selectAllTables = () => {
-    setSelectedTablesForMigration([...mssqlTables]);
+    setSelectedTablesForMigration([...tables]);
   };
   
   // Deselect all tables for migration
@@ -350,15 +305,12 @@ export default function DatabaseManager() {
     setMigrationResults(null);
     
     try {
-      const response = await fetch('/api/database/migrate', {
+      const response = await fetch('/api/sql-file/migrate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mssqlConfig,
           mysqlConfig,
           tables: selectedTablesForMigration,
-          batchSize: 1000,
-          createTables: true,
         }),
       });
       
@@ -366,8 +318,6 @@ export default function DatabaseManager() {
       
       if (data.success) {
         setMigrationResults(data.results);
-        // Refresh MySQL tables
-        connectMysql();
       } else {
         alert(data.error);
       }
@@ -377,6 +327,11 @@ export default function DatabaseManager() {
       setMigrating(false);
     }
   };
+  
+  // Check database on mount
+  useEffect(() => {
+    checkDatabase();
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
@@ -389,10 +344,10 @@ export default function DatabaseManager() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
-                Database Manager
+                SQL File Manager
               </h1>
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                Connect, view, edit data and migrate from MSSQL to MySQL
+                Open, view, edit MSSQL .sql dump files and migrate to MySQL
               </p>
             </div>
           </div>
@@ -400,385 +355,284 @@ export default function DatabaseManager() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Connection Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-          {/* MSSQL Connection */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Server className="h-5 w-5 text-blue-600" />
-                MSSQL Server
-                {mssqlConnected && (
-                  <Badge variant="default" className="ml-2 bg-green-500">
-                    <CheckCircle2 className="h-3 w-3 mr-1" />
-                    Connected
-                  </Badge>
-                )}
-              </CardTitle>
-              <CardDescription>
-                Connect to Microsoft SQL Server database
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="mssql-server">Server</Label>
-                  <Input
-                    id="mssql-server"
-                    value={mssqlConfig.server}
-                    onChange={(e) => setMssqlConfig({ ...mssqlConfig, server: e.target.value })}
-                    placeholder="localhost"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="mssql-port">Port</Label>
-                  <Input
-                    id="mssql-port"
-                    type="number"
-                    value={mssqlConfig.port}
-                    onChange={(e) => setMssqlConfig({ ...mssqlConfig, port: parseInt(e.target.value) || 1433 })}
-                  />
-                </div>
-              </div>
-              <div>
-                <Label htmlFor="mssql-database">Database</Label>
-                <Input
-                  id="mssql-database"
-                  value={mssqlConfig.database}
-                  onChange={(e) => setMssqlConfig({ ...mssqlConfig, database: e.target.value })}
-                  placeholder="database_name"
+        {/* SQL File Input Section */}
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <FolderOpen className="h-5 w-5 text-blue-600" />
+              Open SQL File
+            </CardTitle>
+            <CardDescription>
+              Enter the path to your MSSQL .sql dump file on the server (e.g., /home/user/backup.sql)
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex gap-4">
+              <div className="flex-1">
+                <Label htmlFor="sql-path">SQL File Path</Label>
+                <input
+                  id="sql-path"
+                  type="text"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  value={sqlFilePath}
+                  onChange={(e) => setSqlFilePath(e.target.value)}
+                  placeholder="/path/to/your/file.sql"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="mssql-user">Username</Label>
-                  <Input
-                    id="mssql-user"
-                    value={mssqlConfig.user}
-                    onChange={(e) => setMssqlConfig({ ...mssqlConfig, user: e.target.value })}
-                    placeholder="sa"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="mssql-password">Password</Label>
-                  <Input
-                    id="mssql-password"
-                    type="password"
-                    value={mssqlConfig.password}
-                    onChange={(e) => setMssqlConfig({ ...mssqlConfig, password: e.target.value })}
-                    placeholder="••••••••"
-                  />
-                </div>
+              <div className="flex items-end">
+                <Button 
+                  onClick={parseSQLFile} 
+                  disabled={parsing || !sqlFilePath}
+                  className="min-w-32"
+                >
+                  {parsing ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Play className="h-4 w-4 mr-2" />
+                  )}
+                  Parse File
+                </Button>
               </div>
-              
-              {mssqlError && (
-                <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-950/30 text-red-600 rounded-lg text-sm">
-                  <XCircle className="h-4 w-4" />
-                  {mssqlError}
-                </div>
-              )}
-              
-              <Button 
-                onClick={connectMssql} 
-                disabled={loadingTables || !mssqlConfig.database}
-                className="w-full"
-              >
-                {loadingTables ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Play className="h-4 w-4 mr-2" />
-                )}
-                Connect
-              </Button>
-              
-              {mssqlConnected && mssqlTables.length > 0 && (
-                <div>
-                  <Label>Tables ({mssqlTables.length})</Label>
-                  <ScrollArea className="h-48 border rounded-lg mt-2">
-                    <div className="p-2 space-y-1">
-                      {mssqlTables.map((table) => (
-                        <Button
-                          key={table}
-                          variant="ghost"
-                          size="sm"
-                          className="w-full justify-start"
-                          onClick={() => loadTableData(table, 'mssql')}
-                        >
-                          <Table2 className="h-4 w-4 mr-2 text-blue-600" />
-                          {table}
-                        </Button>
-                      ))}
-                    </div>
-                  </ScrollArea>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-          
-          {/* MySQL Connection */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Database className="h-5 w-5 text-orange-600" />
-                MySQL Server
-                {mysqlConnected && (
-                  <Badge variant="default" className="ml-2 bg-green-500">
-                    <CheckCircle2 className="h-3 w-3 mr-1" />
-                    Connected
-                  </Badge>
-                )}
-              </CardTitle>
-              <CardDescription>
-                Connect to MySQL database
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="mysql-host">Host</Label>
-                  <Input
-                    id="mysql-host"
-                    value={mysqlConfig.host}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, host: e.target.value })}
-                    placeholder="localhost"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="mysql-port">Port</Label>
-                  <Input
-                    id="mysql-port"
-                    type="number"
-                    value={mysqlConfig.port}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, port: parseInt(e.target.value) || 3306 })}
-                  />
-                </div>
+            </div>
+            
+            {parseProgress && (
+              <div className={`p-3 rounded-lg ${parseProgress.includes('Error') ? 'bg-red-50 dark:bg-red-950/30 text-red-600' : 'bg-green-50 dark:bg-green-950/30 text-green-600'}`}>
+                {parseProgress}
               </div>
-              <div>
-                <Label htmlFor="mysql-database">Database</Label>
-                <Input
-                  id="mysql-database"
-                  value={mysqlConfig.database}
-                  onChange={(e) => setMysqlConfig({ ...mysqlConfig, database: e.target.value })}
-                  placeholder="database_name"
-                />
+            )}
+            
+            {dbReady && (
+              <div className="flex items-center gap-2 text-green-600">
+                <CheckCircle2 className="h-5 w-5" />
+                <span>Database loaded with {tables.length} tables</span>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="mysql-user">Username</Label>
-                  <Input
-                    id="mysql-user"
-                    value={mysqlConfig.user}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, user: e.target.value })}
-                    placeholder="root"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="mysql-password">Password</Label>
-                  <Input
-                    id="mysql-password"
-                    type="password"
-                    value={mysqlConfig.password}
-                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, password: e.target.value })}
-                    placeholder="••••••••"
-                  />
-                </div>
-              </div>
-              
-              {mysqlError && (
-                <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-950/30 text-red-600 rounded-lg text-sm">
-                  <XCircle className="h-4 w-4" />
-                  {mysqlError}
-                </div>
-              )}
-              
-              <Button 
-                onClick={connectMysql} 
-                disabled={loadingTables || !mysqlConfig.database}
-                className="w-full"
-              >
-                {loadingTables ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Play className="h-4 w-4 mr-2" />
-                )}
-                Connect
-              </Button>
-              
-              {mysqlConnected && mysqlTables.length > 0 && (
-                <div>
-                  <Label>Tables ({mysqlTables.length})</Label>
-                  <ScrollArea className="h-48 border rounded-lg mt-2">
-                    <div className="p-2 space-y-1">
-                      {mysqlTables.map((table) => (
-                        <Button
-                          key={table}
-                          variant="ghost"
-                          size="sm"
-                          className="w-full justify-start"
-                          onClick={() => loadTableData(table, 'mysql')}
-                        >
-                          <Table2 className="h-4 w-4 mr-2 text-orange-600" />
-                          {table}
-                        </Button>
-                      ))}
-                    </div>
-                  </ScrollArea>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-        
-        {/* Migration Button */}
-        {mssqlConnected && mysqlConnected && (
-          <div className="mb-6 flex justify-center">
-            <Button 
-              onClick={() => setMigrationDialogOpen(true)}
-              size="lg"
-              className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700"
-            >
-              <ArrowRight className="h-5 w-5 mr-2" />
-              Migrate MSSQL to MySQL
-            </Button>
-          </div>
-        )}
-        
-        {/* Data Viewer */}
-        {selectedTable && (
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle className="flex items-center gap-2">
-                    <Table2 className="h-5 w-5" />
-                    {selectedTable}
-                    <Badge variant="outline">
-                      {selectedDbType?.toUpperCase()}
-                    </Badge>
-                  </CardTitle>
-                  <CardDescription>
-                    {tableData?.total || 0} rows • Page {tableData?.page || 1} of {tableData?.totalPages || 1}
-                  </CardDescription>
-                </div>
-                <div className="flex items-center gap-2">
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Main Content */}
+        {dbReady && (
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            {/* Tables List */}
+            <Card className="lg:col-span-1">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-lg">Tables ({tables.length})</CardTitle>
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => openEditDialog({}, 'add')}
+                    onClick={() => setMigrationDialogOpen(true)}
                   >
-                    <Plus className="h-4 w-4 mr-1" />
-                    Add Row
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => loadTableData(selectedTable, selectedDbType!, tableData?.page || 1)}
-                  >
-                    <RefreshCw className="h-4 w-4 mr-1" />
-                    Refresh
+                    <ArrowRight className="h-4 w-4 mr-1" />
+                    Migrate
                   </Button>
                 </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {loadingData ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-                </div>
-              ) : tableData && tableData.data.length > 0 ? (
-                <>
-                  <div className="overflow-x-auto border rounded-lg">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          {Object.keys(tableData.data[0]).map((col) => (
-                            <TableHead key={col} className="font-semibold whitespace-nowrap">
-                              {col}
-                              {tableSchema?.primaryKeys.includes(col) && (
-                                <Badge variant="secondary" className="ml-1 text-xs">PK</Badge>
-                              )}
-                            </TableHead>
-                          ))}
-                          <TableHead className="w-24">Actions</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {tableData.data.map((row, rowIndex) => (
-                          <TableRow key={rowIndex}>
-                            {Object.values(row).map((value, colIndex) => (
-                              <TableCell key={colIndex} className="whitespace-nowrap max-w-xs truncate">
-                                {value === null ? (
-                                  <span className="text-muted-foreground italic">NULL</span>
-                                ) : typeof value === 'object' ? (
-                                  JSON.stringify(value)
-                                ) : (
-                                  String(value)
-                                )}
-                              </TableCell>
-                            ))}
-                            <TableCell>
-                              <div className="flex items-center gap-1">
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => openEditDialog(row, 'edit')}
-                                >
-                                  <Edit2 className="h-4 w-4" />
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => deleteRow(row)}
-                                >
-                                  <Trash2 className="h-4 w-4 text-red-500" />
-                                </Button>
-                              </div>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
+              </CardHeader>
+              <CardContent className="p-0">
+                <ScrollArea className="h-[500px]">
+                  <div className="p-2 space-y-1">
+                    {tables.map((table) => (
+                      <Button
+                        key={table}
+                        variant={selectedTable === table ? 'default' : 'ghost'}
+                        size="sm"
+                        className="w-full justify-start"
+                        onClick={() => loadTableData(table)}
+                      >
+                        <Table2 className="h-4 w-4 mr-2 text-blue-600" />
+                        {table}
+                      </Button>
+                    ))}
                   </div>
-                  
-                  {/* Pagination */}
-                  <div className="flex items-center justify-between mt-4">
-                    <p className="text-sm text-muted-foreground">
-                      Showing {((tableData.page - 1) * tableData.pageSize) + 1} to{' '}
-                      {Math.min(tableData.page * tableData.pageSize, tableData.total)} of{' '}
-                      {tableData.total} rows
-                    </p>
+                </ScrollArea>
+              </CardContent>
+            </Card>
+
+            {/* Data Viewer */}
+            <Card className="lg:col-span-3">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      {selectedTable ? (
+                        <>
+                          <Table2 className="h-5 w-5" />
+                          {selectedTable}
+                        </>
+                      ) : (
+                        'Select a Table'
+                      )}
+                    </CardTitle>
+                    {tableData && (
+                      <CardDescription>
+                        {tableData.total} rows • Page {tableData.page} of {tableData.totalPages}
+                      </CardDescription>
+                    )}
+                  </div>
+                  {selectedTable && (
                     <div className="flex items-center gap-2">
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={tableData.page <= 1}
-                        onClick={() => handlePageChange(tableData.page - 1)}
+                        onClick={() => openEditDialog({}, 'add')}
                       >
-                        <ChevronLeft className="h-4 w-4" />
-                        Previous
+                        <Plus className="h-4 w-4 mr-1" />
+                        Add Row
                       </Button>
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={tableData.page >= tableData.totalPages}
-                        onClick={() => handlePageChange(tableData.page + 1)}
+                        onClick={() => loadTableData(selectedTable, tableData?.page || 1)}
                       >
-                        Next
-                        <ChevronRight className="h-4 w-4" />
+                        <RefreshCw className="h-4 w-4 mr-1" />
+                        Refresh
                       </Button>
                     </div>
-                  </div>
-                </>
-              ) : (
-                <div className="text-center py-12 text-muted-foreground">
-                  No data found in this table
+                  )}
                 </div>
-              )}
+              </CardHeader>
+              <CardContent>
+                {loadingData ? (
+                  <div className="flex items-center justify-center py-12">
+                    <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                  </div>
+                ) : tableData && tableData.data.length > 0 ? (
+                  <>
+                    <div className="overflow-x-auto border rounded-lg">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            {Object.keys(tableData.data[0]).map((col) => (
+                              <TableHead key={col} className="font-semibold whitespace-nowrap">
+                                {col}
+                                {tableSchema?.primaryKeys.includes(col) && (
+                                  <Badge variant="secondary" className="ml-1 text-xs">PK</Badge>
+                                )}
+                              </TableHead>
+                            ))}
+                            <TableHead className="w-24">Actions</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {tableData.data.map((row, rowIndex) => (
+                            <TableRow key={rowIndex}>
+                              {Object.values(row).map((value, colIndex) => (
+                                <TableCell key={colIndex} className="whitespace-nowrap max-w-xs truncate">
+                                  {value === null ? (
+                                    <span className="text-muted-foreground italic">NULL</span>
+                                  ) : typeof value === 'object' ? (
+                                    JSON.stringify(value)
+                                  ) : (
+                                    String(value)
+                                  )}
+                                </TableCell>
+                              ))}
+                              <TableCell>
+                                <div className="flex items-center gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => openEditDialog(row, 'edit')}
+                                  >
+                                    <Edit2 className="h-4 w-4" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => deleteRow(row)}
+                                  >
+                                    <Trash2 className="h-4 w-4 text-red-500" />
+                                  </Button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                    
+                    {/* Pagination */}
+                    <div className="flex items-center justify-between mt-4">
+                      <p className="text-sm text-muted-foreground">
+                        Showing {((tableData.page - 1) * tableData.pageSize) + 1} to{' '}
+                        {Math.min(tableData.page * tableData.pageSize, tableData.total)} of{' '}
+                        {tableData.total} rows
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={tableData.page <= 1}
+                          onClick={() => handlePageChange(tableData.page - 1)}
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                          Previous
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={tableData.page >= tableData.totalPages}
+                          onClick={() => handlePageChange(tableData.page + 1)}
+                        >
+                          Next
+                          <ChevronRight className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </>
+                ) : selectedTable ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    No data found in this table
+                  </div>
+                ) : (
+                  <div className="text-center py-12 text-muted-foreground">
+                    Select a table from the left to view its data
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* Instructions */}
+        {!dbReady && !parsing && (
+          <Card className="bg-slate-50 dark:bg-slate-800/50">
+            <CardHeader>
+              <CardTitle className="text-lg">How to Use</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
+                  <h4 className="font-semibold mb-2">1. Enter SQL File Path</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Provide the full path to your MSSQL .sql dump file on the server.
+                    For example: <code className="text-xs bg-slate-100 dark:bg-slate-800 px-1 rounded">/home/user/backup.sql</code>
+                  </p>
+                </div>
+                <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
+                  <h4 className="font-semibold mb-2">2. Parse & View Data</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Click "Parse File" to extract tables and data. Large files (900MB+) will be processed efficiently.
+                  </p>
+                </div>
+                <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
+                  <h4 className="font-semibold mb-2">3. Edit Data</h4>
+                  <p className="text-sm text-muted-foreground">
+                    View, add, edit, or delete rows in any table. Changes are stored locally.
+                  </p>
+                </div>
+                <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
+                  <h4 className="font-semibold mb-2">4. Migrate to MySQL</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Connect to your MySQL database and migrate selected tables with automatic schema conversion.
+                  </p>
+                </div>
+              </div>
             </CardContent>
           </Card>
         )}
       </main>
-      
+
       {/* Edit Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
         <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
@@ -795,25 +649,26 @@ export default function DatabaseManager() {
           
           <div className="space-y-4 py-4">
             {tableSchema?.columns.map((col) => {
-              const isPrimaryKey = tableSchema.primaryKeys.includes(col.COLUMN_NAME);
+              const isPrimaryKey = tableSchema.primaryKeys.includes(col.name);
               return (
-                <div key={col.COLUMN_NAME}>
-                  <Label htmlFor={`edit-${col.COLUMN_NAME}`}>
-                    {col.COLUMN_NAME}
+                <div key={col.name}>
+                  <Label htmlFor={`edit-${col.name}`}>
+                    {col.name}
                     {isPrimaryKey && <Badge variant="secondary" className="ml-2">PK</Badge>}
                     <span className="text-xs text-muted-foreground ml-2">
-                      ({col.DATA_TYPE}{col.IS_NULLABLE === 'NO' ? ', NOT NULL' : ''})
+                      ({col.type}{!col.nullable ? ', NOT NULL' : ''})
                     </span>
                   </Label>
-                  <Input
-                    id={`edit-${col.COLUMN_NAME}`}
-                    value={editingRow[col.COLUMN_NAME]?.toString() || ''}
+                  <input
+                    id={`edit-${col.name}`}
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    value={editingRow[col.name]?.toString() || ''}
                     onChange={(e) => setEditingRow({ 
                       ...editingRow, 
-                      [col.COLUMN_NAME]: e.target.value 
+                      [col.name]: e.target.value 
                     })}
                     disabled={editMode === 'edit' && isPrimaryKey}
-                    placeholder={col.IS_NULLABLE === 'YES' ? 'NULL' : ''}
+                    placeholder={col.nullable ? 'NULL' : ''}
                   />
                 </div>
               );
@@ -837,49 +692,105 @@ export default function DatabaseManager() {
       <Dialog open={migrationDialogOpen} onOpenChange={setMigrationDialogOpen}>
         <DialogContent className="max-w-3xl max-h-[80vh]">
           <DialogHeader>
-            <DialogTitle>Migrate MSSQL to MySQL</DialogTitle>
+            <DialogTitle>Migrate to MySQL</DialogTitle>
             <DialogDescription>
-              Select tables to migrate from MSSQL to MySQL. Tables will be created automatically in MySQL.
+              Select tables to migrate from your SQL file to MySQL database
             </DialogDescription>
           </DialogHeader>
           
           <div className="space-y-4 py-4">
-            <div className="flex items-center justify-between">
-              <p className="text-sm font-medium">
-                {selectedTablesForMigration.length} of {mssqlTables.length} tables selected
-              </p>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={selectAllTables}>
-                  Select All
-                </Button>
-                <Button variant="outline" size="sm" onClick={deselectAllTables}>
-                  Deselect All
-                </Button>
+            {/* MySQL Connection */}
+            <div className="border rounded-lg p-4">
+              <h4 className="font-semibold mb-3 flex items-center gap-2">
+                <Server className="h-4 w-4" />
+                MySQL Connection
+              </h4>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Host</Label>
+                  <input
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={mysqlConfig.host}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, host: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <Label>Port</Label>
+                  <input
+                    type="number"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={mysqlConfig.port}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, port: parseInt(e.target.value) || 3306 })}
+                  />
+                </div>
+                <div className="col-span-2">
+                  <Label>Database</Label>
+                  <input
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={mysqlConfig.database}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, database: e.target.value })}
+                    placeholder="database_name"
+                  />
+                </div>
+                <div>
+                  <Label>Username</Label>
+                  <input
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={mysqlConfig.user}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, user: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <Label>Password</Label>
+                  <input
+                    type="password"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={mysqlConfig.password}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, password: e.target.value })}
+                  />
+                </div>
               </div>
             </div>
             
-            <ScrollArea className="h-64 border rounded-lg">
-              <div className="p-2 space-y-2">
-                {mssqlTables.map((table) => (
-                  <label
-                    key={table}
-                    className="flex items-center gap-3 p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded cursor-pointer"
-                  >
-                    <Checkbox
-                      checked={selectedTablesForMigration.includes(table)}
-                      onCheckedChange={() => toggleTableSelection(table)}
-                    />
-                    <Table2 className="h-4 w-4 text-blue-600" />
-                    <span>{table}</span>
-                  </label>
-                ))}
+            {/* Table Selection */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <Label>{selectedTablesForMigration.length} of {tables.length} tables selected</Label>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={selectAllTables}>
+                    Select All
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={deselectAllTables}>
+                    Deselect All
+                  </Button>
+                </div>
               </div>
-            </ScrollArea>
+              <ScrollArea className="h-48 border rounded-lg">
+                <div className="p-2 space-y-2">
+                  {tables.map((table) => (
+                    <label
+                      key={table}
+                      className="flex items-center gap-3 p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedTablesForMigration.includes(table)}
+                        onChange={() => toggleTableSelection(table)}
+                        className="h-4 w-4"
+                      />
+                      <Table2 className="h-4 w-4 text-blue-600" />
+                      <span>{table}</span>
+                    </label>
+                  ))}
+                </div>
+              </ScrollArea>
+            </div>
             
+            {/* Migration Results */}
             {migrationResults && (
               <div className="border rounded-lg p-4 bg-slate-50 dark:bg-slate-800">
                 <h4 className="font-semibold mb-2">Migration Results</h4>
-                <ScrollArea className="h-48">
+                <ScrollArea className="h-32">
                   <div className="space-y-2">
                     {migrationResults.map((result) => (
                       <div
@@ -896,9 +807,6 @@ export default function DatabaseManager() {
                           <XCircle className="h-4 w-4" />
                         )}
                         <span className="font-medium">{result.table}</span>
-                        {result.rowsMigrated !== undefined && (
-                          <span className="text-sm">({result.rowsMigrated} rows)</span>
-                        )}
                         {result.error && (
                           <span className="text-sm">- {result.error}</span>
                         )}
@@ -916,7 +824,7 @@ export default function DatabaseManager() {
             </Button>
             <Button
               onClick={runMigration}
-              disabled={migrating || selectedTablesForMigration.length === 0}
+              disabled={migrating || selectedTablesForMigration.length === 0 || !mysqlConfig.database}
               className="bg-gradient-to-r from-blue-500 to-purple-600"
             >
               {migrating ? (
@@ -934,7 +842,7 @@ export default function DatabaseManager() {
       <footer className="mt-auto border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <p className="text-center text-sm text-slate-500 dark:text-slate-400">
-            Database Manager - View, edit, and migrate data between MSSQL and MySQL
+            SQL File Manager - Open, view, edit MSSQL dump files and migrate to MySQL
           </p>
         </div>
       </footer>
