@@ -33,98 +33,302 @@ import {
   ChevronRight,
   Save,
   X,
-  Server,
   Upload,
   Download,
+  FolderOpen,
+  AlertCircle,
+  Eye,
 } from 'lucide-react';
 
-// Simple SQL parser for MSSQL dump files
-function parseSQLDump(sql: string): { tables: Map<string, { columns: { name: string; type: string }[]; primaryKeys: string[]; rows: unknown[][] }> } {
+// Parse MSSQL dump file
+function parseSQLDump(sql: string): { 
+  tables: Map<string, { 
+    columns: { name: string; type: string }[]; 
+    primaryKeys: string[]; 
+    rows: unknown[][] 
+  }> 
+} {
   const tables = new Map<string, { columns: { name: string; type: string }[]; primaryKeys: string[]; rows: unknown[][] }>();
   
-  // Split by statements
-  const statements = sql.split(/;\s*\n/);
+  // Normalize the SQL - replace GO with semicolons, handle different line endings
+  let normalizedSQL = sql
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/^\s*GO\s*$/gim, ';\n')
+    .replace(/^\s*USE\s+\[?\w+\]?\s*$/gim, '')
+    .replace(/^\s*SET\s+.*$/gim, '');
   
-  for (const stmt of statements) {
-    const trimmed = stmt.trim();
-    if (!trimmed) continue;
+  // Split by statements - handle both semicolons and GO
+  const statements: string[] = [];
+  let currentStmt = '';
+  let inString = false;
+  let stringChar = '';
+  let parenDepth = 0;
+  
+  for (let i = 0; i < normalizedSQL.length; i++) {
+    const char = normalizedSQL[i];
+    const nextChar = normalizedSQL[i + 1] || '';
     
-    // Parse CREATE TABLE
-    if (trimmed.toUpperCase().startsWith('CREATE TABLE')) {
-      const match = trimmed.match(/CREATE\s+TABLE\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?\s*\(([\s\S]+)\)/i);
-      if (match) {
-        const tableName = match[1];
-        const columnsStr = match[2];
-        
-        const columns: { name: string; type: string }[] = [];
-        const primaryKeys: string[] = [];
-        
-        // Parse columns
-        const parts = columnsStr.split(/,\s*(?![^()]*\))/);
-        
-        for (const part of parts) {
-          const trimmedPart = part.trim();
-          
-          // Primary key constraint
-          if (trimmedPart.match(/PRIMARY\s+KEY\s*\((.+)\)/i)) {
-            const pkMatch = trimmedPart.match(/PRIMARY\s+KEY\s*\((.+)\)/i);
-            if (pkMatch) {
-              const pkCols = pkMatch[1].split(',').map(c => c.replace(/[\[\]]/g, '').trim());
-              primaryKeys.push(...pkCols);
-            }
-            continue;
-          }
-          
-          // Skip other constraints
-          if (trimmedPart.match(/^(CONSTRAINT|FOREIGN\s+KEY|UNIQUE|CHECK|DEFAULT|INDEX)/i)) {
-            continue;
-          }
-          
-          // Column definition
-          const colMatch = trimmedPart.match(/\[?(\w+)\]?\s+(\w+(?:\s*\([^)]+\))?)\s*(.*)/i);
-          if (colMatch) {
-            const colName = colMatch[1];
-            const colType = colMatch[2];
-            columns.push({ name: colName, type: colType });
-            
-            // Check for inline PRIMARY KEY
-            if (colMatch[3] && colMatch[3].toUpperCase().includes('PRIMARY KEY')) {
-              primaryKeys.push(colName);
-            }
-          }
-        }
-        
-        tables.set(tableName, { columns, primaryKeys, rows: [] });
+    // Track string literals
+    if ((char === "'" || char === '"') && !inString) {
+      inString = true;
+      stringChar = char;
+    } else if (char === stringChar && inString) {
+      if (nextChar === stringChar) {
+        currentStmt += char + nextChar;
+        i++;
+        continue;
+      }
+      inString = false;
+    }
+    
+    if (!inString) {
+      if (char === '(') parenDepth++;
+      if (char === ')') parenDepth--;
+      
+      // Statement end
+      if (char === ';' && parenDepth === 0) {
+        const stmt = currentStmt.trim();
+        if (stmt) statements.push(stmt);
+        currentStmt = '';
+        continue;
       }
     }
     
-    // Parse INSERT
-    if (trimmed.toUpperCase().startsWith('INSERT INTO')) {
-      const match = trimmed.match(/INSERT\s+INTO\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?\s*(?:\(([^)]+)\))?\s*VALUES\s*\(([\s\S]+)\)/i);
-      if (match) {
-        const tableName = match[1];
-        const valuesStr = match[3];
-        
-        // Parse values
-        const values = parseValues(valuesStr);
-        
-        let table = tables.get(tableName);
-        if (!table) {
-          // Create table from insert
-          table = { 
-            columns: values.map((_, i) => ({ name: `column_${i}`, type: 'TEXT' })),
-            primaryKeys: [],
-            rows: []
-          };
-          tables.set(tableName, table);
-        }
-        
-        table.rows.push(values);
-      }
+    currentStmt += char;
+  }
+  
+  // Add last statement
+  const lastStmt = currentStmt.trim();
+  if (lastStmt) statements.push(lastStmt);
+  
+  console.log(`Found ${statements.length} statements`);
+  
+  // Process each statement
+  for (const stmt of statements) {
+    const upperStmt = stmt.toUpperCase().trim();
+    
+    // Skip empty and certain statements
+    if (!stmt || upperStmt.startsWith('PRINT') || upperStmt.startsWith('EXEC') || 
+        upperStmt.startsWith('ALTER ') || upperStmt.startsWith('DROP ') ||
+        upperStmt.startsWith('CREATE PROC') || upperStmt.startsWith('CREATE FUNC') ||
+        upperStmt.startsWith('CREATE VIEW') || upperStmt.startsWith('CREATE TRIGGER') ||
+        upperStmt.startsWith('--')) {
+      continue;
+    }
+    
+    // Parse CREATE TABLE
+    if (upperStmt.startsWith('CREATE TABLE')) {
+      parseCreateTable(stmt, tables);
+    }
+    
+    // Parse INSERT INTO
+    if (upperStmt.startsWith('INSERT INTO')) {
+      parseInsert(stmt, tables);
     }
   }
   
   return { tables };
+}
+
+// Parse CREATE TABLE statement
+function parseCreateTable(stmt: string, tables: Map<string, any>) {
+  try {
+    // Match various CREATE TABLE formats
+    // CREATE TABLE [dbo].[TableName] (...)
+    // CREATE TABLE TableName (...)
+    // CREATE TABLE [TableName] (...)
+    
+    let tableName = '';
+    let columnsStr = '';
+    
+    // Try different patterns
+    const patterns = [
+      /CREATE\s+TABLE\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?\s*\(([\s\S]+)\)\s*(?:ON\s+PRIMARY)?$/i,
+      /CREATE\s+TABLE\s+(\w+)\s*\(([\s\S]+)\)\s*(?:ON\s+PRIMARY)?$/i,
+    ];
+    
+    for (const pattern of patterns) {
+      const match = stmt.match(pattern);
+      if (match) {
+        tableName = match[1];
+        columnsStr = match[2];
+        break;
+      }
+    }
+    
+    if (!tableName || !columnsStr) {
+      console.log('Could not parse CREATE TABLE:', stmt.substring(0, 100));
+      return;
+    }
+    
+    console.log('Found table:', tableName);
+    
+    const columns: { name: string; type: string }[] = [];
+    const primaryKeys: string[] = [];
+    
+    // Parse columns - need to handle nested parentheses
+    const parts = splitColumns(columnsStr);
+    
+    for (const part of parts) {
+      const trimmedPart = part.trim();
+      if (!trimmedPart) continue;
+      
+      const upperPart = trimmedPart.toUpperCase();
+      
+      // PRIMARY KEY constraint
+      if (upperPart.startsWith('PRIMARY KEY')) {
+        const pkMatch = trimmedPart.match(/PRIMARY\s+KEY\s*\((.+)\)/i);
+        if (pkMatch) {
+          const pkCols = pkMatch[1].split(',').map(c => c.replace(/[\[\]]/g, '').trim());
+          primaryKeys.push(...pkCols);
+        }
+        continue;
+      }
+      
+      // Skip other constraints
+      if (upperPart.startsWith('CONSTRAINT') || upperPart.startsWith('FOREIGN KEY') ||
+          upperPart.startsWith('UNIQUE') || upperPart.startsWith('CHECK') ||
+          upperPart.startsWith('DEFAULT') || upperPart.startsWith('INDEX') ||
+          upperPart.startsWith('KEY ')) {
+        continue;
+      }
+      
+      // Column definition
+      // [ColumnName] DataType [(size)] [NULL/NOT NULL] [IDENTITY] [PRIMARY KEY] [DEFAULT x]
+      const colMatch = trimmedPart.match(/^\[?(\w+)\]?\s+(\w+)(?:\s*\(([^)]+)\))?(.*)$/i);
+      if (colMatch) {
+        const colName = colMatch[1];
+        const colType = colMatch[2] + (colMatch[3] ? `(${colMatch[3]})` : '');
+        const rest = colMatch[4] || '';
+        
+        columns.push({ name: colName, type: colType });
+        
+        // Check for inline PRIMARY KEY
+        if (rest.toUpperCase().includes('PRIMARY KEY')) {
+          primaryKeys.push(colName);
+        }
+      }
+    }
+    
+    if (columns.length > 0) {
+      tables.set(tableName, { columns, primaryKeys, rows: [] });
+      console.log(`Table ${tableName} has ${columns.length} columns`);
+    }
+  } catch (error) {
+    console.error('Error parsing CREATE TABLE:', error);
+  }
+}
+
+// Split column definitions handling nested parentheses
+function splitColumns(str: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let depth = 0;
+  let inString = false;
+  let stringChar = '';
+  
+  for (let i = 0; i < str.length; i++) {
+    const char = str[i];
+    const nextChar = str[i + 1] || '';
+    
+    if ((char === "'" || char === '"') && !inString) {
+      inString = true;
+      stringChar = char;
+    } else if (char === stringChar && inString) {
+      if (nextChar === stringChar) {
+        current += char + nextChar;
+        i++;
+        continue;
+      }
+      inString = false;
+    }
+    
+    if (!inString) {
+      if (char === '(') depth++;
+      if (char === ')') depth--;
+      
+      if (char === ',' && depth === 0) {
+        parts.push(current.trim());
+        current = '';
+        continue;
+      }
+    }
+    
+    current += char;
+  }
+  
+  if (current.trim()) {
+    parts.push(current.trim());
+  }
+  
+  return parts;
+}
+
+// Parse INSERT statement
+function parseInsert(stmt: string, tables: Map<string, any>) {
+  try {
+    // Match INSERT INTO [dbo].[TableName] (columns) VALUES (values)
+    // or INSERT INTO TableName VALUES (values)
+    
+    let tableName = '';
+    let columnsStr = '';
+    let valuesStr = '';
+    
+    // Pattern with columns
+    let match = stmt.match(/INSERT\s+INTO\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+)\)/i);
+    
+    if (match) {
+      tableName = match[1];
+      columnsStr = match[2];
+      valuesStr = match[3];
+    } else {
+      // Pattern without columns
+      match = stmt.match(/INSERT\s+INTO\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?\s*VALUES\s*\(([\s\S]+)\)/i);
+      if (match) {
+        tableName = match[1];
+        valuesStr = match[2];
+      }
+    }
+    
+    if (!tableName || !valuesStr) {
+      return;
+    }
+    
+    // Parse columns
+    let columns: string[] = [];
+    if (columnsStr) {
+      columns = columnsStr.split(',').map(c => c.replace(/[\[\]]/g, '').trim());
+    }
+    
+    // Parse values
+    const values = parseValues(valuesStr);
+    
+    // Get or create table
+    let table = tables.get(tableName);
+    if (!table) {
+      // Create table from insert data
+      if (columns.length > 0) {
+        table = {
+          columns: columns.map(c => ({ name: c, type: 'TEXT' })),
+          primaryKeys: [],
+          rows: []
+        };
+      } else {
+        table = {
+          columns: values.map((_, i) => ({ name: `Column${i + 1}`, type: 'TEXT' })),
+          primaryKeys: [],
+          rows: []
+        };
+      }
+      tables.set(tableName, table);
+    }
+    
+    table.rows.push(values);
+    
+  } catch (error) {
+    console.error('Error parsing INSERT:', error);
+  }
 }
 
 // Parse values from INSERT statement
@@ -133,34 +337,35 @@ function parseValues(str: string): unknown[] {
   let current = '';
   let inString = false;
   let stringChar = '';
-  let depth = 0;
+  let parenDepth = 0;
   
   for (let i = 0; i < str.length; i++) {
     const char = str[i];
-    const prevChar = i > 0 ? str[i - 1] : '';
+    const nextChar = str[i + 1] || '';
     
-    // Handle string literals
-    if ((char === "'" || char === '"') && prevChar !== '\\') {
-      if (!inString) {
-        inString = true;
-        stringChar = char;
-        continue;
-      } else if (char === stringChar) {
-        // Check for escaped quote
-        if (str[i + 1] === stringChar) {
-          current += char;
-          continue;
-        }
-        inString = false;
+    // Track string literals
+    if ((char === "'" || char === '"') && !inString) {
+      inString = true;
+      stringChar = char;
+      continue;
+    }
+    
+    if (char === stringChar && inString) {
+      // Check for escaped quote
+      if (nextChar === stringChar) {
+        current += stringChar;
+        i++;
         continue;
       }
+      inString = false;
+      continue;
     }
     
     if (!inString) {
-      if (char === '(') depth++;
-      if (char === ')') depth--;
+      if (char === '(') parenDepth++;
+      if (char === ')') parenDepth--;
       
-      if (char === ',' && depth === 0) {
+      if (char === ',' && parenDepth === 0) {
         values.push(parseValue(current.trim()));
         current = '';
         continue;
@@ -179,54 +384,44 @@ function parseValues(str: string): unknown[] {
 
 // Parse a single value
 function parseValue(str: string): unknown {
-  if (str === 'NULL' || str === 'null') return null;
+  if (!str || str.toUpperCase() === 'NULL') return null;
   
-  // String value
+  // Remove surrounding quotes if present
   if ((str.startsWith("'") && str.endsWith("'")) || (str.startsWith('"') && str.endsWith('"'))) {
-    return str.slice(1, -1).replace(/''/g, "'").replace(/\\"/g, '"');
+    return str.slice(1, -1).replace(/''/g, "'");
   }
   
-  // Number
+  // Numbers
   if (/^-?\d+$/.test(str)) return parseInt(str, 10);
   if (/^-?\d+\.\d+$/.test(str)) return parseFloat(str);
   
   // Boolean
-  if (str.toLowerCase() === 'true') return true;
-  if (str.toLowerCase() === 'false') return false;
+  if (str.toUpperCase() === 'TRUE') return true;
+  if (str.toUpperCase() === 'FALSE') return false;
   
   return str;
-}
-
-// MSSQL to SQLite type mapping
-function mssqlToSqliteType(mssqlType: string): string {
-  const type = mssqlType.toUpperCase();
-  if (type.includes('INT')) return 'INTEGER';
-  if (type.includes('CHAR') || type.includes('TEXT') || type.includes('VARCHAR')) return 'TEXT';
-  if (type.includes('DECIMAL') || type.includes('NUMERIC') || type.includes('FLOAT') || type.includes('REAL') || type.includes('MONEY')) return 'REAL';
-  if (type.includes('DATE') || type.includes('TIME')) return 'TEXT';
-  if (type === 'BIT') return 'INTEGER';
-  return 'TEXT';
 }
 
 // MSSQL to MySQL type mapping
 function mssqlToMysqlType(mssqlType: string): string {
   const type = mssqlType.toUpperCase();
-  if (type === 'BIGINT') return 'BIGINT';
-  if (type === 'INT' || type === 'INTEGER') return 'INT';
-  if (type === 'SMALLINT') return 'SMALLINT';
-  if (type === 'TINYINT') return 'TINYINT';
-  if (type === 'BIT') return 'BOOLEAN';
+  if (type.includes('BIGINT')) return 'BIGINT';
+  if (type.includes('INT')) return 'INT';
+  if (type.includes('SMALLINT')) return 'SMALLINT';
+  if (type.includes('TINYINT')) return 'TINYINT';
+  if (type.includes('BIT')) return 'BOOLEAN';
   if (type.includes('DECIMAL') || type.includes('NUMERIC')) return 'DECIMAL(18,4)';
-  if (type === 'MONEY' || type === 'SMALLMONEY') return 'DECIMAL(19,4)';
-  if (type === 'FLOAT') return 'DOUBLE';
-  if (type === 'REAL') return 'FLOAT';
+  if (type.includes('MONEY')) return 'DECIMAL(19,4)';
+  if (type.includes('FLOAT')) return 'DOUBLE';
+  if (type.includes('REAL')) return 'FLOAT';
   if (type.includes('DATETIME')) return 'DATETIME';
-  if (type === 'DATE') return 'DATE';
-  if (type === 'TIME') return 'TIME';
-  if (type.includes('VARCHAR') || type.includes('NVARCHAR')) return 'VARCHAR(255)';
-  if (type.includes('CHAR') || type.includes('NCHAR')) return 'CHAR(255)';
-  if (type === 'NTEXT' || type === 'TEXT') return 'LONGTEXT';
-  if (type === 'UNIQUEIDENTIFIER') return 'CHAR(36)';
+  if (type.includes('DATE')) return 'DATE';
+  if (type.includes('TIME')) return 'TIME';
+  if (type.includes('NTEXT') || type.includes('TEXT')) return 'LONGTEXT';
+  if (type.includes('NVARCHAR') || type.includes('VARCHAR')) return 'VARCHAR(255)';
+  if (type.includes('NCHAR') || type.includes('CHAR')) return 'CHAR(255)';
+  if (type.includes('UNIQUEIDENTIFIER')) return 'CHAR(36)';
+  if (type.includes('XML')) return 'LONGTEXT';
   return 'TEXT';
 }
 
@@ -247,12 +442,18 @@ interface TableData {
 export default function SQLFileManager() {
   // File states
   const [fileName, setFileName] = useState<string>('');
+  const [filePath, setFilePath] = useState<string>('');
   const [parsing, setParsing] = useState(false);
   const [parseProgress, setParseProgress] = useState({ percent: 0, message: '' });
+  const [parseError, setParseError] = useState<string | null>(null);
   const [tables, setTables] = useState<string[]>([]);
   const [tableSchemas, setTableSchemas] = useState<Map<string, TableSchema>>(new Map());
   const [tableRows, setTableRows] = useState<Map<string, unknown[][]>>(new Map());
   const [dbReady, setDbReady] = useState(false);
+  
+  // Preview
+  const [previewSQL, setPreviewSQL] = useState<string>('');
+  const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
   
   // Data viewer states
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
@@ -266,101 +467,134 @@ export default function SQLFileManager() {
   const [editingRow, setEditingRow] = useState<Record<string, unknown>>({});
   const [rowIndex, setRowIndex] = useState<number>(-1);
   
-  // MySQL connection for migration
-  const [mysqlConfig, setMysqlConfig] = useState({
-    host: '',
-    port: 3306,
-    database: '',
-    user: '',
-    password: '',
-  });
-  
-  // Migration states
+  // Export states
   const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
   const [selectedTablesForMigration, setSelectedTablesForMigration] = useState<string[]>([]);
-  const [migrating, setMigrating] = useState(false);
   const [migrationResults, setMigrationResults] = useState<{ table: string; status: string; sql: string }[] | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [rawSQL, setRawSQL] = useState<string>('');
 
+  // Parse SQL content
+  const parseSQL = useCallback((sql: string, name: string) => {
+    setParsing(true);
+    setParseError(null);
+    setParseProgress({ percent: 30, message: 'Parsing SQL statements...' });
+    
+    setTimeout(() => {
+      try {
+        console.log('SQL length:', sql.length);
+        console.log('First 500 chars:', sql.substring(0, 500));
+        
+        setParseProgress({ percent: 50, message: 'Extracting tables...' });
+        
+        const result = parseSQLDump(sql);
+        
+        setParseProgress({ percent: 80, message: 'Processing data...' });
+        
+        // Convert to our format
+        const tableNames: string[] = [];
+        const schemas = new Map<string, TableSchema>();
+        const rows = new Map<string, unknown[][]>();
+        
+        for (const [tableName, table] of result.tables) {
+          tableNames.push(tableName);
+          
+          schemas.set(tableName, {
+            name: tableName,
+            columns: table.columns.map(col => ({
+              name: col.name,
+              type: col.type,
+              nullable: true,
+            })),
+            primaryKeys: table.primaryKeys,
+          });
+          
+          rows.set(tableName, table.rows);
+          
+          console.log(`Table ${tableName}: ${table.columns.length} columns, ${table.rows.length} rows`);
+        }
+        
+        tableNames.sort();
+        
+        setTables(tableNames);
+        setTableSchemas(schemas);
+        setTableRows(rows);
+        setDbReady(true);
+        
+        if (tableNames.length === 0) {
+          setParseError('No tables found in the SQL file. Please check the file format.');
+          setParseProgress({ percent: 100, message: 'No tables found' });
+        } else {
+          setParseProgress({ percent: 100, message: `Found ${tableNames.length} tables!` });
+        }
+        
+      } catch (error) {
+        console.error('Parse error:', error);
+        setParseError(error instanceof Error ? error.message : 'Failed to parse SQL');
+        setParseProgress({ percent: 0, message: 'Error parsing file' });
+      } finally {
+        setParsing(false);
+      }
+    }, 100);
+  }, []);
+  
   // Handle file selection
   const handleFileSelect = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     
     setFileName(file.name);
+    setParseError(null);
     setParsing(true);
-    setParseProgress({ percent: 0, message: 'Reading file...' });
+    setParseProgress({ percent: 10, message: 'Reading file...' });
     
     try {
-      // Read file in chunks
-      const chunkSize = 10 * 1024 * 1024; // 10MB chunks
-      const fileSize = file.size;
-      let offset = 0;
-      let sqlContent = '';
-      
       const reader = new FileReader();
       
-      const readChunk = (start: number): Promise<string> => {
-        return new Promise((resolve, reject) => {
-          const end = Math.min(start + chunkSize, fileSize);
-          const blob = file.slice(start, end);
-          
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsText(blob);
-        });
+      reader.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percent = Math.round((e.loaded / e.total) * 30);
+          setParseProgress({ percent, message: `Reading file... ${Math.round(e.loaded / 1024 / 1024)}MB` });
+        }
       };
       
-      while (offset < fileSize) {
-        const chunk = await readChunk(offset);
-        sqlContent += chunk;
-        offset += chunkSize;
-        
-        const percent = Math.round((offset / fileSize) * 50);
-        setParseProgress({ percent, message: `Reading file... ${Math.round(offset / 1024 / 1024)}MB / ${Math.round(fileSize / 1024 / 1024)}MB` });
-      }
+      reader.onload = (e) => {
+        const sql = e.target?.result as string;
+        setRawSQL(sql);
+        parseSQL(sql, file.name);
+      };
       
-      setParseProgress({ percent: 50, message: 'Parsing SQL statements...' });
+      reader.onerror = () => {
+        setParseError('Failed to read file');
+        setParsing(false);
+      };
       
-      // Parse SQL
-      const result = parseSQLDump(sqlContent);
-      
-      setParseProgress({ percent: 90, message: 'Processing tables...' });
-      
-      // Convert to our format
-      const tableNames: string[] = [];
-      const schemas = new Map<string, TableSchema>();
-      const rows = new Map<string, unknown[][]>();
-      
-      for (const [tableName, table] of result.tables) {
-        tableNames.push(tableName);
-        
-        schemas.set(tableName, {
-          name: tableName,
-          columns: table.columns.map(col => ({
-            name: col.name,
-            type: col.type,
-            nullable: true,
-          })),
-          primaryKeys: table.primaryKeys,
-        });
-        
-        rows.set(tableName, table.rows);
-      }
-      
-      setTables(tableNames.sort());
-      setTableSchemas(schemas);
-      setTableRows(rows);
-      setDbReady(true);
-      setParseProgress({ percent: 100, message: `Complete! Found ${tableNames.length} tables.` });
+      reader.readAsText(file);
       
     } catch (error) {
-      setParseProgress({ percent: 0, message: `Error: ${error instanceof Error ? error.message : 'Failed to parse'}` });
-    } finally {
+      setParseError(error instanceof Error ? error.message : 'Failed to read file');
       setParsing(false);
     }
-  }, []);
+  }, [parseSQL]);
+  
+  // Handle path input (for demo/testing - shows a textarea to paste SQL)
+  const handlePathLoad = useCallback(() => {
+    if (!filePath) return;
+    
+    // Show preview dialog for pasting SQL
+    setPreviewSQL('');
+    setPreviewDialogOpen(true);
+  }, [filePath]);
+
+  // Parse pasted SQL
+  const parsePastedSQL = useCallback(() => {
+    if (!previewSQL) return;
+    
+    setFileName(filePath || 'pasted_sql.sql');
+    parseSQL(previewSQL, filePath || 'pasted_sql.sql');
+    setPreviewDialogOpen(false);
+  }, [previewSQL, filePath, parseSQL]);
   
   // Load table data
   const loadTableData = (tableName: string, page: number = 1) => {
@@ -423,11 +657,9 @@ export default function SQLFileManager() {
     const rows = tableRows.get(selectedTable) || [];
     
     if (editMode === 'add') {
-      // Add new row
       const newRow = tableSchema.columns.map(col => editingRow[col.name]);
       rows.push(newRow);
     } else {
-      // Update existing row
       const actualIndex = (tableData.page - 1) * tableData.pageSize + rowIndex;
       const updatedRow = tableSchema.columns.map(col => editingRow[col.name]);
       rows[actualIndex] = updatedRow;
@@ -452,7 +684,7 @@ export default function SQLFileManager() {
     loadTableData(selectedTable, tableData.page);
   };
   
-  // Toggle table selection for migration
+  // Toggle table selection for export
   const toggleTableSelection = (tableName: string) => {
     setSelectedTablesForMigration(prev => 
       prev.includes(tableName) 
@@ -571,13 +803,14 @@ export default function SQLFileManager() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Upload className="h-5 w-5 text-blue-600" />
-              Upload SQL File
+              Load SQL File
             </CardTitle>
             <CardDescription>
-              Select your MSSQL .sql dump file from your computer (supports large files)
+              Upload your MSSQL .sql dump file or paste SQL content
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* File Upload */}
             <input
               ref={fileInputRef}
               type="file"
@@ -599,6 +832,28 @@ export default function SQLFileManager() {
               </p>
             </div>
             
+            {/* Or paste path */}
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <Label htmlFor="path-input">Or enter file path / paste SQL directly:</Label>
+                <div className="flex gap-2 mt-1">
+                  <input
+                    id="path-input"
+                    type="text"
+                    className="flex h-10 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    value={filePath}
+                    onChange={(e) => setFilePath(e.target.value)}
+                    placeholder="/path/to/file.sql or click Open to paste SQL"
+                  />
+                  <Button variant="outline" onClick={handlePathLoad}>
+                    <FolderOpen className="h-4 w-4 mr-1" />
+                    Open
+                  </Button>
+                </div>
+              </div>
+            </div>
+            
+            {/* Progress */}
             {parsing && (
               <div className="space-y-2">
                 <Progress value={parseProgress.percent} />
@@ -606,6 +861,15 @@ export default function SQLFileManager() {
               </div>
             )}
             
+            {/* Error */}
+            {parseError && (
+              <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-950/30 text-red-600 rounded-lg">
+                <AlertCircle className="h-5 w-5" />
+                {parseError}
+              </div>
+            )}
+            
+            {/* Success */}
             {dbReady && !parsing && (
               <div className="flex items-center gap-2 text-green-600">
                 <CheckCircle2 className="h-5 w-5" />
@@ -616,7 +880,7 @@ export default function SQLFileManager() {
         </Card>
 
         {/* Main Content */}
-        {dbReady && (
+        {dbReady && tables.length > 0 && (
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
             {/* Tables List */}
             <Card className="lg:col-span-1">
@@ -638,6 +902,7 @@ export default function SQLFileManager() {
                   <div className="p-2 space-y-1">
                     {tables.map((table) => {
                       const rowCount = tableRows.get(table)?.length || 0;
+                      const colCount = tableSchemas.get(table)?.columns.length || 0;
                       return (
                         <Button
                           key={table}
@@ -648,7 +913,9 @@ export default function SQLFileManager() {
                         >
                           <Table2 className="h-4 w-4 mr-2 text-blue-600" />
                           <span className="truncate flex-1 text-left">{table}</span>
-                          <Badge variant="secondary" className="ml-1">{rowCount}</Badge>
+                          <Badge variant="secondary" className="ml-1 text-xs">
+                            {colCount}c / {rowCount}r
+                          </Badge>
                         </Button>
                       );
                     })}
@@ -814,26 +1081,26 @@ export default function SQLFileManager() {
                 <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
                   <h4 className="font-semibold mb-2">1. Upload SQL File</h4>
                   <p className="text-sm text-muted-foreground">
-                    Click the upload area and select your MSSQL .sql dump file from your computer.
-                    Large files (900MB+) are supported.
+                    Click the upload area and select your MSSQL .sql dump file. 
+                    The file is processed entirely in your browser.
                   </p>
                 </div>
                 <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
-                  <h4 className="font-semibold mb-2">2. View & Edit Data</h4>
+                  <h4 className="font-semibold mb-2">2. Or Paste SQL</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Enter a file path and click "Open" to paste SQL content directly.
+                  </p>
+                </div>
+                <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
+                  <h4 className="font-semibold mb-2">3. View & Edit Data</h4>
                   <p className="text-sm text-muted-foreground">
                     Browse tables, view data with pagination, add, edit, or delete rows.
                   </p>
                 </div>
                 <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
-                  <h4 className="font-semibold mb-2">3. Export to MySQL</h4>
+                  <h4 className="font-semibold mb-2">4. Export to MySQL</h4>
                   <p className="text-sm text-muted-foreground">
-                    Click "Export" to generate MySQL-compatible SQL statements for migration.
-                  </p>
-                </div>
-                <div className="p-4 bg-white dark:bg-slate-900 rounded-lg">
-                  <h4 className="font-semibold mb-2">4. Download Export</h4>
-                  <p className="text-sm text-muted-foreground">
-                    Download the generated MySQL SQL file and run it on your MySQL server.
+                    Click "Export" to generate MySQL-compatible SQL and download it.
                   </p>
                 </div>
               </div>
@@ -841,6 +1108,37 @@ export default function SQLFileManager() {
           </Card>
         )}
       </main>
+
+      {/* Preview/Paste SQL Dialog */}
+      <Dialog open={previewDialogOpen} onOpenChange={setPreviewDialogOpen}>
+        <DialogContent className="max-w-4xl max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle>Paste SQL Content</DialogTitle>
+            <DialogDescription>
+              Paste your MSSQL dump content below or paste the file contents
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="py-4">
+            <textarea
+              className="w-full h-96 p-3 border rounded-md font-mono text-sm"
+              value={previewSQL}
+              onChange={(e) => setPreviewSQL(e.target.value)}
+              placeholder="Paste your SQL content here..."
+            />
+          </div>
+          
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPreviewDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={parsePastedSQL} disabled={!previewSQL}>
+              <Play className="h-4 w-4 mr-2" />
+              Parse SQL
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Edit Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
