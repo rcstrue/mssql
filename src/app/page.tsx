@@ -3,254 +3,379 @@
 import { useState, useCallback } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { 
-  Upload, 
-  FileText, 
-  Trash2, 
-  Download, 
-  IndianRupee, 
-  Users, 
-  Building2,
-  AlertCircle,
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import {
+  Database,
+  Server,
+  Table2,
+  Play,
+  RefreshCw,
+  Edit2,
+  Trash2,
+  Plus,
+  ArrowRight,
   CheckCircle2,
+  XCircle,
   Loader2,
-  Calculator
+  ChevronLeft,
+  ChevronRight,
+  Save,
+  X,
 } from 'lucide-react';
 
-interface ECRRecord {
-  uan: string;
-  memberName: string;
-  accountNo: string;
-  wages: number;
-  epfContribution: number;
-  epsContribution: number;
-  epfDiff: number;
-  epsDiff: number;
-  ncpDays: number;
-  refundOfAdvances: number;
+interface ConnectionConfig {
+  mssql: {
+    server: string;
+    port: number;
+    database: string;
+    user: string;
+    password: string;
+  } | null;
+  mysql: {
+    host: string;
+    port: number;
+    database: string;
+    user: string;
+    password: string;
+  } | null;
 }
 
-interface AccountSummary {
-  accountNo: string;
-  memberCount: number;
-  totalWages: number;
-  totalEPF: number;
-  totalEPS: number;
-  totalEPFDiff: number;
-  totalEPSDiff: number;
-  totalRefund: number;
-  grandTotal: number;
+interface TableData {
+  data: Record<string, unknown>[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
 }
 
-interface EPFPayableBreakdown {
-  account1: number;
-  account2: number;
-  account10: number;
-  account20: number;
-  account21: number;
-  account22: number;
-  totalPayable: number;
+interface TableSchema {
+  columns: { COLUMN_NAME: string; DATA_TYPE: string; IS_NULLABLE: string }[];
+  primaryKeys: string[];
 }
 
-interface ParsedECRFile {
-  fileName: string;
-  records: ECRRecord[];
-  totals: {
-    totalWages: number;
-    totalEPF: number;
-    totalEPS: number;
-    totalEPFDiff: number;
-    totalEPSDiff: number;
-    totalRefund: number;
-    memberCount: number;
-  };
-  accountWiseSummary: AccountSummary[];
-  epfPayableBreakdown: EPFPayableBreakdown;
+interface MigrationResult {
+  table: string;
+  status: 'success' | 'error';
+  rowsMigrated?: number;
+  error?: string;
 }
 
-interface FileWiseEPFPayable {
-  fileName: string;
-  breakdown: EPFPayableBreakdown;
-}
+export default function DatabaseManager() {
+  // Connection states
+  const [mssqlConfig, setMssqlConfig] = useState({
+    server: 'localhost',
+    port: 1433,
+    database: '',
+    user: 'sa',
+    password: '',
+  });
+  
+  const [mysqlConfig, setMysqlConfig] = useState({
+    host: 'localhost',
+    port: 3306,
+    database: '',
+    user: 'root',
+    password: '',
+  });
+  
+  const [mssqlTables, setMssqlTables] = useState<string[]>([]);
+  const [mysqlTables, setMysqlTables] = useState<string[]>([]);
+  const [mssqlConnected, setMssqlConnected] = useState(false);
+  const [mysqlConnected, setMysqlConnected] = useState(false);
+  
+  // Data viewer states
+  const [selectedTable, setSelectedTable] = useState<string | null>(null);
+  const [selectedDbType, setSelectedDbType] = useState<'mssql' | 'mysql' | null>(null);
+  const [tableData, setTableData] = useState<TableData | null>(null);
+  const [tableSchema, setTableSchema] = useState<TableSchema | null>(null);
+  const [loadingTables, setLoadingTables] = useState(false);
+  const [loadingData, setLoadingData] = useState(false);
+  
+  // Edit states
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editMode, setEditMode] = useState<'edit' | 'add'>('edit');
+  const [editingRow, setEditingRow] = useState<Record<string, unknown>>({});
+  const [primaryKeyValues, setPrimaryKeyValues] = useState<Record<string, unknown>>({});
+  
+  // Migration states
+  const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
+  const [selectedTablesForMigration, setSelectedTablesForMigration] = useState<string[]>([]);
+  const [migrating, setMigrating] = useState(false);
+  const [migrationResults, setMigrationResults] = useState<MigrationResult[] | null>(null);
+  
+  // Error states
+  const [mssqlError, setMssqlError] = useState<string | null>(null);
+  const [mysqlError, setMysqlError] = useState<string | null>(null);
 
-interface APIResponse {
-  success: boolean;
-  files: ParsedECRFile[];
-  combinedAccountSummary: AccountSummary[];
-  grandTotals: {
-    totalWages: number;
-    totalEPF: number;
-    totalEPS: number;
-    totalEPFDiff: number;
-    totalEPSDiff: number;
-    totalRefund: number;
-    memberCount: number;
-    grandTotal: number;
-  };
-  combinedEPFPayableBreakdown: EPFPayableBreakdown;
-  fileWiseEPFPayable: FileWiseEPFPayable[];
-}
-
-const formatCurrency = (amount: number): string => {
-  return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(amount);
-};
-
-const formatNumber = (num: number): string => {
-  return new Intl.NumberFormat('en-IN').format(num);
-};
-
-export default function ECRMaker() {
-  const [files, setFiles] = useState<File[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<APIResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [dragActive, setDragActive] = useState(false);
-
-  const handleDrag = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === 'dragenter' || e.type === 'dragover') {
-      setDragActive(true);
-    } else if (e.type === 'dragleave') {
-      setDragActive(false);
-    }
-  }, []);
-
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-    
-    const droppedFiles = Array.from(e.dataTransfer.files).filter(
-      file => file.type === 'text/plain' || file.name.endsWith('.txt')
-    );
-    
-    setFiles(prev => [...prev, ...droppedFiles]);
-    setError(null);
-  }, []);
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
-      const selectedFiles = Array.from(e.target.files).filter(
-        file => file.type === 'text/plain' || file.name.endsWith('.txt')
-      );
-      setFiles(prev => [...prev, ...selectedFiles]);
-      setError(null);
-    }
-  };
-
-  const removeFile = (index: number) => {
-    setFiles(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const clearAll = () => {
-    setFiles([]);
-    setResult(null);
-    setError(null);
-  };
-
-  const processFiles = async () => {
-    if (files.length === 0) return;
-    
-    setLoading(true);
-    setError(null);
-    setResult(null);
+  // Connect to MSSQL
+  const connectMssql = async () => {
+    setLoadingTables(true);
+    setMssqlError(null);
     
     try {
-      const formData = new FormData();
-      files.forEach(file => formData.append('files', file));
-      
-      const response = await fetch('/api/ecr-parser', {
+      const response = await fetch('/api/database/connect', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'mssql', config: mssqlConfig }),
       });
       
       const data = await response.json();
       
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to process files');
+      if (data.success) {
+        setMssqlTables(data.tables);
+        setMssqlConnected(true);
+      } else {
+        setMssqlError(data.error);
+        setMssqlConnected(false);
       }
-      
-      setResult(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+    } catch (error) {
+      setMssqlError(error instanceof Error ? error.message : 'Connection failed');
+      setMssqlConnected(false);
     } finally {
-      setLoading(false);
+      setLoadingTables(false);
     }
   };
-
-  const exportToCSV = () => {
-    if (!result) return;
+  
+  // Connect to MySQL
+  const connectMysql = async () => {
+    setLoadingTables(true);
+    setMysqlError(null);
     
-    let csvContent = 'data:text/csv;charset=utf-8,';
-    
-    // EPF Payable Breakdown
-    csvContent += 'EPF PAYABLE BREAKDOWN (Account-wise)\n';
-    csvContent += 'Account No,Description,Amount\n';
-    csvContent += `A/C No. 01,EPF Contribution (Employee + Employer),${result.combinedEPFPayableBreakdown.account1}\n`;
-    csvContent += `A/C No. 02,EPF Difference (3.67%),${result.combinedEPFPayableBreakdown.account2}\n`;
-    csvContent += `A/C No. 10,EPS Contribution (8.33%),${result.combinedEPFPayableBreakdown.account10}\n`;
-    csvContent += `A/C No. 20,EDLI Contribution (0.5%),${result.combinedEPFPayableBreakdown.account20}\n`;
-    csvContent += `A/C No. 21,EDLI Admin Charges (0.005%),${result.combinedEPFPayableBreakdown.account21}\n`;
-    csvContent += `A/C No. 22,EPF Admin Charges (0%),${result.combinedEPFPayableBreakdown.account22}\n`;
-    csvContent += `TOTAL,Total EPF Payable,${result.combinedEPFPayableBreakdown.totalPayable}\n`;
-    
-    // Combined Account Summary
-    csvContent += '\n\nCOMBINED ACCOUNT-WISE SUMMARY\n';
-    csvContent += 'Account No,Member Count,Total Wages,EPF Contribution,EPS Contribution,EPF Difference,EPS Difference,Refund of Advances,Grand Total\n';
-    
-    result.combinedAccountSummary.forEach(account => {
-      csvContent += `${account.accountNo},${account.memberCount},${account.totalWages},${account.totalEPF},${account.totalEPS},${account.totalEPFDiff},${account.totalEPSDiff},${account.totalRefund},${account.grandTotal}\n`;
-    });
-    
-    // Grand Totals
-    csvContent += `\nGRAND TOTALS\n`;
-    csvContent += `Total Members,${result.grandTotals.memberCount}\n`;
-    csvContent += `Total Wages,${result.grandTotals.totalWages}\n`;
-    csvContent += `Total EPF,${result.grandTotals.totalEPF}\n`;
-    csvContent += `Total EPS,${result.grandTotals.totalEPS}\n`;
-    csvContent += `Total EPF Diff,${result.grandTotals.totalEPFDiff}\n`;
-    csvContent += `Total EPS Diff,${result.grandTotals.totalEPSDiff}\n`;
-    csvContent += `Total Refund,${result.grandTotals.totalRefund}\n`;
-    csvContent += `Grand Total,${result.grandTotals.grandTotal}\n`;
-    
-    // File-wise summary
-    csvContent += `\n\nFILE-WISE SUMMARY\n`;
-    csvContent += 'File Name,Members,Accounts,Total Wages,EPF Contribution,EPS Contribution,EPF Difference,EPS Difference,Refund,Grand Total\n';
-    
-    result.files.forEach((file) => {
-      const fileGrandTotal = 
-        file.totals.totalEPF + 
-        file.totals.totalEPS + 
-        file.totals.totalEPFDiff + 
-        file.totals.totalEPSDiff + 
-        file.totals.totalRefund;
+    try {
+      const response = await fetch('/api/database/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'mysql', config: mysqlConfig }),
+      });
       
-      csvContent += `${file.fileName},${file.totals.memberCount},${file.accountWiseSummary.length},${file.totals.totalWages},${file.totals.totalEPF},${file.totals.totalEPS},${file.totals.totalEPFDiff},${file.totals.totalEPSDiff},${file.totals.totalRefund},${fileGrandTotal}\n`;
+      const data = await response.json();
+      
+      if (data.success) {
+        setMysqlTables(data.tables);
+        setMysqlConnected(true);
+      } else {
+        setMysqlError(data.error);
+        setMysqlConnected(false);
+      }
+    } catch (error) {
+      setMysqlError(error instanceof Error ? error.message : 'Connection failed');
+      setMysqlConnected(false);
+    } finally {
+      setLoadingTables(false);
+    }
+  };
+  
+  // Load table data
+  const loadTableData = async (tableName: string, dbType: 'mssql' | 'mysql', page: number = 1) => {
+    setLoadingData(true);
+    setSelectedTable(tableName);
+    setSelectedDbType(dbType);
+    
+    try {
+      const config = dbType === 'mssql' ? mssqlConfig : mysqlConfig;
+      
+      // Get schema
+      const schemaResponse = await fetch('/api/database/tables', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: dbType, config, tableName }),
+      });
+      const schemaData = await schemaResponse.json();
+      if (schemaData.success) {
+        setTableSchema(schemaData.schema);
+      }
+      
+      // Get data
+      const dataResponse = await fetch('/api/database/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: dbType, config, tableName, page, pageSize: 50 }),
+      });
+      const dataData = await dataResponse.json();
+      if (dataData.success) {
+        setTableData(dataData);
+      }
+    } catch (error) {
+      console.error('Failed to load table data:', error);
+    } finally {
+      setLoadingData(false);
+    }
+  };
+  
+  // Handle page change
+  const handlePageChange = (newPage: number) => {
+    if (selectedTable && selectedDbType) {
+      loadTableData(selectedTable, selectedDbType, newPage);
+    }
+  };
+  
+  // Open edit dialog
+  const openEditDialog = (row: Record<string, unknown>, mode: 'edit' | 'add' = 'edit') => {
+    if (!tableSchema) return;
+    
+    setEditMode(mode);
+    setEditingRow({ ...row });
+    
+    if (mode === 'edit' && tableSchema.primaryKeys.length > 0) {
+      const pkValues: Record<string, unknown> = {};
+      tableSchema.primaryKeys.forEach(pk => {
+        pkValues[pk] = row[pk];
+      });
+      setPrimaryKeyValues(pkValues);
+    } else {
+      setPrimaryKeyValues({});
+    }
+    
+    setEditDialogOpen(true);
+  };
+  
+  // Save row changes
+  const saveRowChanges = async () => {
+    if (!selectedTable || !selectedDbType || !tableSchema) return;
+    
+    const config = selectedDbType === 'mssql' ? mssqlConfig : mysqlConfig;
+    
+    try {
+      const action = editMode === 'add' ? 'insert' : 'update';
+      const body: Record<string, unknown> = {
+        type: selectedDbType,
+        config,
+        tableName: selectedTable,
+        action,
+        data: editingRow,
+      };
+      
+      if (editMode === 'edit') {
+        body.primaryKey = primaryKeyValues;
+      }
+      
+      const response = await fetch('/api/database/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        setEditDialogOpen(false);
+        loadTableData(selectedTable, selectedDbType, tableData?.page || 1);
+      } else {
+        alert(data.error);
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Failed to save');
+    }
+  };
+  
+  // Delete row
+  const deleteRow = async (row: Record<string, unknown>) => {
+    if (!selectedTable || !selectedDbType || !tableSchema) return;
+    if (tableSchema.primaryKeys.length === 0) {
+      alert('Cannot delete: No primary key defined for this table');
+      return;
+    }
+    
+    if (!confirm('Are you sure you want to delete this row?')) return;
+    
+    const config = selectedDbType === 'mssql' ? mssqlConfig : mysqlConfig;
+    const pkValues: Record<string, unknown> = {};
+    tableSchema.primaryKeys.forEach(pk => {
+      pkValues[pk] = row[pk];
     });
     
-    // File-wise EPF Payable
-    csvContent += `\n\nFILE-WISE EPF PAYABLE BREAKDOWN\n`;
-    csvContent += 'File Name,A/C 01 (EPF),A/C 02 (EPF Diff),A/C 10 (EPS),A/C 20 (EDLI),A/C 21 (EDLI Admin),A/C 22 (EPF Admin),Total Payable\n';
+    try {
+      const response = await fetch('/api/database/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: selectedDbType,
+          config,
+          tableName: selectedTable,
+          action: 'delete',
+          primaryKey: pkValues,
+        }),
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        loadTableData(selectedTable, selectedDbType, tableData?.page || 1);
+      } else {
+        alert(data.error);
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Failed to delete');
+    }
+  };
+  
+  // Toggle table selection for migration
+  const toggleTableSelection = (tableName: string) => {
+    setSelectedTablesForMigration(prev => 
+      prev.includes(tableName) 
+        ? prev.filter(t => t !== tableName)
+        : [...prev, tableName]
+    );
+  };
+  
+  // Select all tables for migration
+  const selectAllTables = () => {
+    setSelectedTablesForMigration([...mssqlTables]);
+  };
+  
+  // Deselect all tables for migration
+  const deselectAllTables = () => {
+    setSelectedTablesForMigration([]);
+  };
+  
+  // Run migration
+  const runMigration = async () => {
+    if (selectedTablesForMigration.length === 0) return;
     
-    result.fileWiseEPFPayable.forEach((item) => {
-      csvContent += `${item.fileName},${item.breakdown.account1},${item.breakdown.account2},${item.breakdown.account10},${item.breakdown.account20},${item.breakdown.account21},${item.breakdown.account22},${item.breakdown.totalPayable}\n`;
-    });
+    setMigrating(true);
+    setMigrationResults(null);
     
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', 'ecr_summary_report.csv');
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    try {
+      const response = await fetch('/api/database/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mssqlConfig,
+          mysqlConfig,
+          tables: selectedTablesForMigration,
+          batchSize: 1000,
+          createTables: true,
+        }),
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        setMigrationResults(data.results);
+        // Refresh MySQL tables
+        connectMysql();
+      } else {
+        alert(data.error);
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Migration failed');
+    } finally {
+      setMigrating(false);
+    }
   };
 
   return (
@@ -258,638 +383,558 @@ export default function ECRMaker() {
       {/* Header */}
       <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="bg-gradient-to-br from-emerald-500 to-teal-600 p-2 rounded-lg">
-                <FileText className="h-6 w-6 text-white" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
-                  EPFO ECR Maker
-                </h1>
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Upload ECR text files to get account-wise contribution summaries
-                </p>
-              </div>
+          <div className="flex items-center gap-3">
+            <div className="bg-gradient-to-br from-blue-500 to-purple-600 p-2 rounded-lg">
+              <Database className="h-6 w-6 text-white" />
             </div>
-            {result && (
-              <Button onClick={exportToCSV} variant="outline" className="gap-2">
-                <Download className="h-4 w-4" />
-                Export CSV
-              </Button>
-            )}
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
+                Database Manager
+              </h1>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                Connect, view, edit data and migrate from MSSQL to MySQL
+              </p>
+            </div>
           </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Upload Section */}
-        <Card className="mb-8">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Upload className="h-5 w-5" />
-              Upload ECR Files
-            </CardTitle>
-            <CardDescription>
-              Upload one or more EPFO ECR text files (.txt). Files can be pipe (|) or tilde (~) separated.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Drop Zone */}
-            <div
-              className={`border-2 border-dashed rounded-lg p-8 text-center transition-all ${
-                dragActive
-                  ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/30'
-                  : 'border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600'
-              }`}
-              onDragEnter={handleDrag}
-              onDragLeave={handleDrag}
-              onDragOver={handleDrag}
-              onDrop={handleDrop}
-            >
-              <Upload className="h-12 w-12 mx-auto mb-4 text-slate-400" />
-              <p className="text-lg font-medium text-slate-700 dark:text-slate-300 mb-2">
-                Drag and drop ECR files here
-              </p>
-              <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
-                or click to browse
-              </p>
-              <label>
-                <input
-                  type="file"
-                  multiple
-                  accept=".txt,text/plain"
-                  onChange={handleFileSelect}
-                  className="hidden"
+        {/* Connection Section */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          {/* MSSQL Connection */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Server className="h-5 w-5 text-blue-600" />
+                MSSQL Server
+                {mssqlConnected && (
+                  <Badge variant="default" className="ml-2 bg-green-500">
+                    <CheckCircle2 className="h-3 w-3 mr-1" />
+                    Connected
+                  </Badge>
+                )}
+              </CardTitle>
+              <CardDescription>
+                Connect to Microsoft SQL Server database
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="mssql-server">Server</Label>
+                  <Input
+                    id="mssql-server"
+                    value={mssqlConfig.server}
+                    onChange={(e) => setMssqlConfig({ ...mssqlConfig, server: e.target.value })}
+                    placeholder="localhost"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="mssql-port">Port</Label>
+                  <Input
+                    id="mssql-port"
+                    type="number"
+                    value={mssqlConfig.port}
+                    onChange={(e) => setMssqlConfig({ ...mssqlConfig, port: parseInt(e.target.value) || 1433 })}
+                  />
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="mssql-database">Database</Label>
+                <Input
+                  id="mssql-database"
+                  value={mssqlConfig.database}
+                  onChange={(e) => setMssqlConfig({ ...mssqlConfig, database: e.target.value })}
+                  placeholder="database_name"
                 />
-                <Button variant="outline" asChild>
-                  <span>Browse Files</span>
-                </Button>
-              </label>
-            </div>
-
-            {/* File List */}
-            {files.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                    Selected Files ({files.length})
-                  </h4>
-                  <Button variant="ghost" size="sm" onClick={clearAll}>
-                    <Trash2 className="h-4 w-4 mr-1" />
-                    Clear All
-                  </Button>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="mssql-user">Username</Label>
+                  <Input
+                    id="mssql-user"
+                    value={mssqlConfig.user}
+                    onChange={(e) => setMssqlConfig({ ...mssqlConfig, user: e.target.value })}
+                    placeholder="sa"
+                  />
                 </div>
-                <div className="max-h-48 overflow-y-auto space-y-2">
-                  {files.map((file, index) => (
-                    <div
-                      key={index}
-                      className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg"
-                    >
-                      <div className="flex items-center gap-3">
-                        <FileText className="h-5 w-5 text-emerald-600" />
-                        <div>
-                          <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                            {file.name}
-                          </p>
-                          <p className="text-xs text-slate-500">
-                            {(file.size / 1024).toFixed(2)} KB
-                          </p>
-                        </div>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => removeFile(index)}
-                      >
-                        <Trash2 className="h-4 w-4 text-red-500" />
-                      </Button>
-                    </div>
-                  ))}
+                <div>
+                  <Label htmlFor="mssql-password">Password</Label>
+                  <Input
+                    id="mssql-password"
+                    type="password"
+                    value={mssqlConfig.password}
+                    onChange={(e) => setMssqlConfig({ ...mssqlConfig, password: e.target.value })}
+                    placeholder="••••••••"
+                  />
                 </div>
               </div>
-            )}
-
-            {/* Error Message */}
-            {error && (
-              <div className="flex items-center gap-2 p-4 bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 rounded-lg">
-                <AlertCircle className="h-5 w-5" />
-                <p>{error}</p>
-              </div>
-            )}
-
-            {/* Process Button */}
-            <Button
-              onClick={processFiles}
-              disabled={files.length === 0 || loading}
-              className="w-full bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Processing Files...
-                </>
-              ) : (
-                <>
-                  <CheckCircle2 className="h-4 w-4 mr-2" />
-                  Process ECR Files
-                </>
+              
+              {mssqlError && (
+                <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-950/30 text-red-600 rounded-lg text-sm">
+                  <XCircle className="h-4 w-4" />
+                  {mssqlError}
+                </div>
               )}
+              
+              <Button 
+                onClick={connectMssql} 
+                disabled={loadingTables || !mssqlConfig.database}
+                className="w-full"
+              >
+                {loadingTables ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4 mr-2" />
+                )}
+                Connect
+              </Button>
+              
+              {mssqlConnected && mssqlTables.length > 0 && (
+                <div>
+                  <Label>Tables ({mssqlTables.length})</Label>
+                  <ScrollArea className="h-48 border rounded-lg mt-2">
+                    <div className="p-2 space-y-1">
+                      {mssqlTables.map((table) => (
+                        <Button
+                          key={table}
+                          variant="ghost"
+                          size="sm"
+                          className="w-full justify-start"
+                          onClick={() => loadTableData(table, 'mssql')}
+                        >
+                          <Table2 className="h-4 w-4 mr-2 text-blue-600" />
+                          {table}
+                        </Button>
+                      ))}
+                    </div>
+                  </ScrollArea>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+          
+          {/* MySQL Connection */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Database className="h-5 w-5 text-orange-600" />
+                MySQL Server
+                {mysqlConnected && (
+                  <Badge variant="default" className="ml-2 bg-green-500">
+                    <CheckCircle2 className="h-3 w-3 mr-1" />
+                    Connected
+                  </Badge>
+                )}
+              </CardTitle>
+              <CardDescription>
+                Connect to MySQL database
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="mysql-host">Host</Label>
+                  <Input
+                    id="mysql-host"
+                    value={mysqlConfig.host}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, host: e.target.value })}
+                    placeholder="localhost"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="mysql-port">Port</Label>
+                  <Input
+                    id="mysql-port"
+                    type="number"
+                    value={mysqlConfig.port}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, port: parseInt(e.target.value) || 3306 })}
+                  />
+                </div>
+              </div>
+              <div>
+                <Label htmlFor="mysql-database">Database</Label>
+                <Input
+                  id="mysql-database"
+                  value={mysqlConfig.database}
+                  onChange={(e) => setMysqlConfig({ ...mysqlConfig, database: e.target.value })}
+                  placeholder="database_name"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="mysql-user">Username</Label>
+                  <Input
+                    id="mysql-user"
+                    value={mysqlConfig.user}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, user: e.target.value })}
+                    placeholder="root"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="mysql-password">Password</Label>
+                  <Input
+                    id="mysql-password"
+                    type="password"
+                    value={mysqlConfig.password}
+                    onChange={(e) => setMysqlConfig({ ...mysqlConfig, password: e.target.value })}
+                    placeholder="••••••••"
+                  />
+                </div>
+              </div>
+              
+              {mysqlError && (
+                <div className="flex items-center gap-2 p-3 bg-red-50 dark:bg-red-950/30 text-red-600 rounded-lg text-sm">
+                  <XCircle className="h-4 w-4" />
+                  {mysqlError}
+                </div>
+              )}
+              
+              <Button 
+                onClick={connectMysql} 
+                disabled={loadingTables || !mysqlConfig.database}
+                className="w-full"
+              >
+                {loadingTables ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4 mr-2" />
+                )}
+                Connect
+              </Button>
+              
+              {mysqlConnected && mysqlTables.length > 0 && (
+                <div>
+                  <Label>Tables ({mysqlTables.length})</Label>
+                  <ScrollArea className="h-48 border rounded-lg mt-2">
+                    <div className="p-2 space-y-1">
+                      {mysqlTables.map((table) => (
+                        <Button
+                          key={table}
+                          variant="ghost"
+                          size="sm"
+                          className="w-full justify-start"
+                          onClick={() => loadTableData(table, 'mysql')}
+                        >
+                          <Table2 className="h-4 w-4 mr-2 text-orange-600" />
+                          {table}
+                        </Button>
+                      ))}
+                    </div>
+                  </ScrollArea>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+        
+        {/* Migration Button */}
+        {mssqlConnected && mysqlConnected && (
+          <div className="mb-6 flex justify-center">
+            <Button 
+              onClick={() => setMigrationDialogOpen(true)}
+              size="lg"
+              className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700"
+            >
+              <ArrowRight className="h-5 w-5 mr-2" />
+              Migrate MSSQL to MySQL
             </Button>
-          </CardContent>
-        </Card>
-
-        {/* Results Section */}
-        {result && (
-          <div className="space-y-6">
-            {/* Summary Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <Card className="bg-gradient-to-br from-emerald-500 to-emerald-600 text-white">
-                <CardContent className="p-4">
-                  <div className="flex items-center gap-3">
-                    <Users className="h-8 w-8 opacity-80" />
-                    <div>
-                      <p className="text-sm opacity-80">Total Members</p>
-                      <p className="text-2xl font-bold">
-                        {formatNumber(result.grandTotals.memberCount)}
-                      </p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-              
-              <Card className="bg-gradient-to-br from-teal-500 to-teal-600 text-white">
-                <CardContent className="p-4">
-                  <div className="flex items-center gap-3">
-                    <Building2 className="h-8 w-8 opacity-80" />
-                    <div>
-                      <p className="text-sm opacity-80">Total Accounts</p>
-                      <p className="text-2xl font-bold">
-                        {formatNumber(result.combinedAccountSummary.length)}
-                      </p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-              
-              <Card className="bg-gradient-to-br from-amber-500 to-amber-600 text-white">
-                <CardContent className="p-4">
-                  <div className="flex items-center gap-3">
-                    <IndianRupee className="h-8 w-8 opacity-80" />
-                    <div>
-                      <p className="text-sm opacity-80">Total Wages</p>
-                      <p className="text-xl font-bold">
-                        {formatCurrency(result.grandTotals.totalWages)}
-                      </p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-              
-              <Card className="bg-gradient-to-br from-rose-500 to-rose-600 text-white">
-                <CardContent className="p-4">
-                  <div className="flex items-center gap-3">
-                    <Calculator className="h-8 w-8 opacity-80" />
-                    <div>
-                      <p className="text-sm opacity-80">Total PF Payable</p>
-                      <p className="text-xl font-bold">
-                        {formatCurrency(result.combinedEPFPayableBreakdown.totalPayable)}
-                      </p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-
-            {/* EPF Payable Breakdown Table */}
-            <Card className="border-2 border-emerald-200 dark:border-emerald-800">
-              <CardHeader className="bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-950/50 dark:to-teal-950/50">
-                <CardTitle className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400">
-                  <Calculator className="h-5 w-5" />
-                  EPF Payable Breakdown (Account-wise)
-                </CardTitle>
-                <CardDescription>
-                  Total PF payable including all contributions and admin charges
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-slate-50 dark:bg-slate-800">
-                      <TableHead className="font-semibold">Account No</TableHead>
-                      <TableHead className="font-semibold">Description</TableHead>
-                      <TableHead className="text-right font-semibold">Amount</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    <TableRow>
-                      <TableCell className="font-medium text-emerald-600">A/C No. 01</TableCell>
-                      <TableCell>EPF Contribution (Employee + Employer Share)</TableCell>
-                      <TableCell className="text-right font-medium">
-                        {formatCurrency(result.combinedEPFPayableBreakdown.account1)}
-                      </TableCell>
-                    </TableRow>
-                    <TableRow className="bg-slate-50/50 dark:bg-slate-800/50">
-                      <TableCell className="font-medium text-teal-600">A/C No. 02</TableCell>
-                      <TableCell>EPF Difference (Employer Share - EPS = 3.67%)</TableCell>
-                      <TableCell className="text-right font-medium">
-                        {formatCurrency(result.combinedEPFPayableBreakdown.account2)}
-                      </TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell className="font-medium text-blue-600">A/C No. 10</TableCell>
-                      <TableCell>EPS Contribution (8.33% of wages)</TableCell>
-                      <TableCell className="text-right font-medium">
-                        {formatCurrency(result.combinedEPFPayableBreakdown.account10)}
-                      </TableCell>
-                    </TableRow>
-                    <TableRow className="bg-slate-50/50 dark:bg-slate-800/50">
-                      <TableCell className="font-medium text-purple-600">A/C No. 20</TableCell>
-                      <TableCell>EDLI Contribution (0.5% of wages)</TableCell>
-                      <TableCell className="text-right font-medium">
-                        {formatCurrency(result.combinedEPFPayableBreakdown.account20)}
-                      </TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell className="font-medium text-orange-600">A/C No. 21</TableCell>
-                      <TableCell>EDLI Admin Charges (0.005% of wages, min ₹2, max ₹500)</TableCell>
-                      <TableCell className="text-right font-medium">
-                        {formatCurrency(result.combinedEPFPayableBreakdown.account21)}
-                      </TableCell>
-                    </TableRow>
-                    <TableRow className="bg-slate-50/50 dark:bg-slate-800/50">
-                      <TableCell className="font-medium text-slate-600">A/C No. 22</TableCell>
-                      <TableCell>EPF Admin Charges (0% - Waived from July 2022)</TableCell>
-                      <TableCell className="text-right font-medium">
-                        {formatCurrency(result.combinedEPFPayableBreakdown.account22)}
-                      </TableCell>
-                    </TableRow>
-                    <TableRow className="bg-emerald-100 dark:bg-emerald-900 font-bold">
-                      <TableCell colSpan={2} className="text-emerald-700 dark:text-emerald-400">
-                        TOTAL PF PAYABLE
-                      </TableCell>
-                      <TableCell className="text-right text-emerald-700 dark:text-emerald-400 text-lg">
-                        {formatCurrency(result.combinedEPFPayableBreakdown.totalPayable)}
-                      </TableCell>
-                    </TableRow>
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
-
-            {/* Detailed Results */}
-            <Tabs defaultValue="combined" className="w-full">
-              <TabsList className="grid w-full grid-cols-3 lg:w-auto lg:inline-grid">
-                <TabsTrigger value="combined">
-                  Combined Summary
-                </TabsTrigger>
-                <TabsTrigger value="files">
-                  File-wise ({result.files.length})
-                </TabsTrigger>
-                <TabsTrigger value="epf-payable">
-                  EPF Payable by File
-                </TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="combined" className="mt-6">
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Combined Account-wise Summary</CardTitle>
-                    <CardDescription>
-                      Total contributions grouped by account number across all uploaded files
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Account No</TableHead>
-                            <TableHead className="text-right">Members</TableHead>
-                            <TableHead className="text-right">Total Wages</TableHead>
-                            <TableHead className="text-right">EPF Contribution</TableHead>
-                            <TableHead className="text-right">EPS Contribution</TableHead>
-                            <TableHead className="text-right">EPF Difference</TableHead>
-                            <TableHead className="text-right">EPS Difference</TableHead>
-                            <TableHead className="text-right">Refund</TableHead>
-                            <TableHead className="text-right font-bold">Grand Total</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {result.combinedAccountSummary.map((account, index) => (
-                            <TableRow key={index}>
-                              <TableCell className="font-medium">
-                                {account.accountNo}
-                              </TableCell>
-                              <TableCell className="text-right">
-                                {formatNumber(account.memberCount)}
-                              </TableCell>
-                              <TableCell className="text-right">
-                                {formatCurrency(account.totalWages)}
-                              </TableCell>
-                              <TableCell className="text-right text-emerald-600">
-                                {formatCurrency(account.totalEPF)}
-                              </TableCell>
-                              <TableCell className="text-right text-teal-600">
-                                {formatCurrency(account.totalEPS)}
-                              </TableCell>
-                              <TableCell className="text-right text-amber-600">
-                                {formatCurrency(account.totalEPFDiff)}
-                              </TableCell>
-                              <TableCell className="text-right text-orange-600">
-                                {formatCurrency(account.totalEPSDiff)}
-                              </TableCell>
-                              <TableCell className="text-right text-blue-600">
-                                {formatCurrency(account.totalRefund)}
-                              </TableCell>
-                              <TableCell className="text-right font-bold text-rose-600">
-                                {formatCurrency(account.grandTotal)}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                          {/* Grand Total Row */}
-                          <TableRow className="bg-slate-100 dark:bg-slate-800 font-bold">
-                            <TableCell>
-                              GRAND TOTAL
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {formatNumber(result.grandTotals.memberCount)}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {formatCurrency(result.grandTotals.totalWages)}
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-600">
-                              {formatCurrency(result.grandTotals.totalEPF)}
-                            </TableCell>
-                            <TableCell className="text-right text-teal-600">
-                              {formatCurrency(result.grandTotals.totalEPS)}
-                            </TableCell>
-                            <TableCell className="text-right text-amber-600">
-                              {formatCurrency(result.grandTotals.totalEPFDiff)}
-                            </TableCell>
-                            <TableCell className="text-right text-orange-600">
-                              {formatCurrency(result.grandTotals.totalEPSDiff)}
-                            </TableCell>
-                            <TableCell className="text-right text-blue-600">
-                              {formatCurrency(result.grandTotals.totalRefund)}
-                            </TableCell>
-                            <TableCell className="text-right text-rose-600">
-                              {formatCurrency(result.grandTotals.grandTotal)}
-                            </TableCell>
-                          </TableRow>
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              <TabsContent value="files" className="mt-6">
-                <Card>
-                  <CardHeader>
-                    <CardTitle>File-wise Summary</CardTitle>
-                    <CardDescription>
-                      Grand totals for each uploaded ECR file
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>File Name</TableHead>
-                            <TableHead className="text-right">Members</TableHead>
-                            <TableHead className="text-right">Accounts</TableHead>
-                            <TableHead className="text-right">Total Wages</TableHead>
-                            <TableHead className="text-right">EPF Contribution</TableHead>
-                            <TableHead className="text-right">EPS Contribution</TableHead>
-                            <TableHead className="text-right">EPF Difference</TableHead>
-                            <TableHead className="text-right">EPS Difference</TableHead>
-                            <TableHead className="text-right">Refund</TableHead>
-                            <TableHead className="text-right font-bold">Grand Total</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {result.files.map((file, index) => {
-                            const fileGrandTotal = 
-                              file.totals.totalEPF + 
-                              file.totals.totalEPS + 
-                              file.totals.totalEPFDiff + 
-                              file.totals.totalEPSDiff + 
-                              file.totals.totalRefund;
-                            
-                            return (
-                              <TableRow key={index}>
-                                <TableCell className="font-medium">
-                                  <div className="flex items-center gap-2">
-                                    <FileText className="h-4 w-4 text-emerald-600" />
-                                    {file.fileName}
-                                  </div>
-                                </TableCell>
-                                <TableCell className="text-right">
-                                  {formatNumber(file.totals.memberCount)}
-                                </TableCell>
-                                <TableCell className="text-right">
-                                  {formatNumber(file.accountWiseSummary.length)}
-                                </TableCell>
-                                <TableCell className="text-right">
-                                  {formatCurrency(file.totals.totalWages)}
-                                </TableCell>
-                                <TableCell className="text-right text-emerald-600">
-                                  {formatCurrency(file.totals.totalEPF)}
-                                </TableCell>
-                                <TableCell className="text-right text-teal-600">
-                                  {formatCurrency(file.totals.totalEPS)}
-                                </TableCell>
-                                <TableCell className="text-right text-amber-600">
-                                  {formatCurrency(file.totals.totalEPFDiff)}
-                                </TableCell>
-                                <TableCell className="text-right text-orange-600">
-                                  {formatCurrency(file.totals.totalEPSDiff)}
-                                </TableCell>
-                                <TableCell className="text-right text-blue-600">
-                                  {formatCurrency(file.totals.totalRefund)}
-                                </TableCell>
-                                <TableCell className="text-right font-bold text-rose-600">
-                                  {formatCurrency(fileGrandTotal)}
-                                </TableCell>
-                              </TableRow>
-                            );
-                          })}
-                          {/* Grand Total Row */}
-                          <TableRow className="bg-slate-100 dark:bg-slate-800 font-bold">
-                            <TableCell>
-                              GRAND TOTAL ({result.files.length} Files)
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {formatNumber(result.grandTotals.memberCount)}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {formatNumber(result.combinedAccountSummary.length)}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {formatCurrency(result.grandTotals.totalWages)}
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-600">
-                              {formatCurrency(result.grandTotals.totalEPF)}
-                            </TableCell>
-                            <TableCell className="text-right text-teal-600">
-                              {formatCurrency(result.grandTotals.totalEPS)}
-                            </TableCell>
-                            <TableCell className="text-right text-amber-600">
-                              {formatCurrency(result.grandTotals.totalEPFDiff)}
-                            </TableCell>
-                            <TableCell className="text-right text-orange-600">
-                              {formatCurrency(result.grandTotals.totalEPSDiff)}
-                            </TableCell>
-                            <TableCell className="text-right text-blue-600">
-                              {formatCurrency(result.grandTotals.totalRefund)}
-                            </TableCell>
-                            <TableCell className="text-right text-rose-600">
-                              {formatCurrency(result.grandTotals.grandTotal)}
-                            </TableCell>
-                          </TableRow>
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </CardContent>
-                </Card>
-              </TabsContent>
-
-              <TabsContent value="epf-payable" className="mt-6">
-                <Card>
-                  <CardHeader>
-                    <CardTitle>EPF Payable Breakdown by File</CardTitle>
-                    <CardDescription>
-                      Account-wise EPF payable amounts for each uploaded file
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>File Name</TableHead>
-                            <TableHead className="text-right">A/C 01 (EPF)</TableHead>
-                            <TableHead className="text-right">A/C 02 (EPF Diff)</TableHead>
-                            <TableHead className="text-right">A/C 10 (EPS)</TableHead>
-                            <TableHead className="text-right">A/C 20 (EDLI)</TableHead>
-                            <TableHead className="text-right">A/C 21 (EDLI Admin)</TableHead>
-                            <TableHead className="text-right">A/C 22 (EPF Admin)</TableHead>
-                            <TableHead className="text-right font-bold">Total Payable</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {result.fileWiseEPFPayable.map((item, index) => (
-                            <TableRow key={index}>
-                              <TableCell className="font-medium">
-                                <div className="flex items-center gap-2">
-                                  <FileText className="h-4 w-4 text-emerald-600" />
-                                  {item.fileName}
-                                </div>
-                              </TableCell>
-                              <TableCell className="text-right text-emerald-600">
-                                {formatCurrency(item.breakdown.account1)}
-                              </TableCell>
-                              <TableCell className="text-right text-teal-600">
-                                {formatCurrency(item.breakdown.account2)}
-                              </TableCell>
-                              <TableCell className="text-right text-blue-600">
-                                {formatCurrency(item.breakdown.account10)}
-                              </TableCell>
-                              <TableCell className="text-right text-purple-600">
-                                {formatCurrency(item.breakdown.account20)}
-                              </TableCell>
-                              <TableCell className="text-right text-orange-600">
-                                {formatCurrency(item.breakdown.account21)}
-                              </TableCell>
-                              <TableCell className="text-right text-slate-500">
-                                {formatCurrency(item.breakdown.account22)}
-                              </TableCell>
-                              <TableCell className="text-right font-bold text-rose-600">
-                                {formatCurrency(item.breakdown.totalPayable)}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                          {/* Grand Total Row */}
-                          <TableRow className="bg-emerald-100 dark:bg-emerald-900 font-bold">
-                            <TableCell className="text-emerald-700 dark:text-emerald-400">
-                              TOTAL PF PAYABLE ({result.files.length} Files)
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-700 dark:text-emerald-400">
-                              {formatCurrency(result.combinedEPFPayableBreakdown.account1)}
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-700 dark:text-emerald-400">
-                              {formatCurrency(result.combinedEPFPayableBreakdown.account2)}
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-700 dark:text-emerald-400">
-                              {formatCurrency(result.combinedEPFPayableBreakdown.account10)}
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-700 dark:text-emerald-400">
-                              {formatCurrency(result.combinedEPFPayableBreakdown.account20)}
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-700 dark:text-emerald-400">
-                              {formatCurrency(result.combinedEPFPayableBreakdown.account21)}
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-700 dark:text-emerald-400">
-                              {formatCurrency(result.combinedEPFPayableBreakdown.account22)}
-                            </TableCell>
-                            <TableCell className="text-right text-emerald-700 dark:text-emerald-400 text-lg">
-                              {formatCurrency(result.combinedEPFPayableBreakdown.totalPayable)}
-                            </TableCell>
-                          </TableRow>
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </CardContent>
-                </Card>
-              </TabsContent>
-            </Tabs>
           </div>
         )}
-
-        {/* Sample Format Info */}
-        {!result && files.length === 0 && (
-          <Card className="bg-slate-50 dark:bg-slate-800/50">
+        
+        {/* Data Viewer */}
+        {selectedTable && (
+          <Card>
             <CardHeader>
-              <CardTitle className="text-lg">ECR File Format</CardTitle>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <Table2 className="h-5 w-5" />
+                    {selectedTable}
+                    <Badge variant="outline">
+                      {selectedDbType?.toUpperCase()}
+                    </Badge>
+                  </CardTitle>
+                  <CardDescription>
+                    {tableData?.total || 0} rows • Page {tableData?.page || 1} of {tableData?.totalPages || 1}
+                  </CardDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => openEditDialog({}, 'add')}
+                  >
+                    <Plus className="h-4 w-4 mr-1" />
+                    Add Row
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => loadTableData(selectedTable, selectedDbType!, tableData?.page || 1)}
+                  >
+                    <RefreshCw className="h-4 w-4 mr-1" />
+                    Refresh
+                  </Button>
+                </div>
+              </div>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">
-                The ECR text file should contain member records in the following format (pipe | or tilde ~ separated):
-              </p>
-              <div className="bg-slate-900 text-slate-100 p-4 rounded-lg font-mono text-sm overflow-x-auto">
-                <code>
-                  UAN~MemberName~AccountNo~Wages~EPFContribution~EPSContribution~EPFDiff~EPSDiff~NCPDays~Refund
-                </code>
-              </div>
-              <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
-                <div className="p-2 bg-white dark:bg-slate-900 rounded">
-                  <span className="font-semibold">UAN</span>: Universal Account Number
+              {loadingData ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
                 </div>
-                <div className="p-2 bg-white dark:bg-slate-900 rounded">
-                  <span className="font-semibold">Account No</span>: PF Account Number
+              ) : tableData && tableData.data.length > 0 ? (
+                <>
+                  <div className="overflow-x-auto border rounded-lg">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          {Object.keys(tableData.data[0]).map((col) => (
+                            <TableHead key={col} className="font-semibold whitespace-nowrap">
+                              {col}
+                              {tableSchema?.primaryKeys.includes(col) && (
+                                <Badge variant="secondary" className="ml-1 text-xs">PK</Badge>
+                              )}
+                            </TableHead>
+                          ))}
+                          <TableHead className="w-24">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {tableData.data.map((row, rowIndex) => (
+                          <TableRow key={rowIndex}>
+                            {Object.values(row).map((value, colIndex) => (
+                              <TableCell key={colIndex} className="whitespace-nowrap max-w-xs truncate">
+                                {value === null ? (
+                                  <span className="text-muted-foreground italic">NULL</span>
+                                ) : typeof value === 'object' ? (
+                                  JSON.stringify(value)
+                                ) : (
+                                  String(value)
+                                )}
+                              </TableCell>
+                            ))}
+                            <TableCell>
+                              <div className="flex items-center gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => openEditDialog(row, 'edit')}
+                                >
+                                  <Edit2 className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => deleteRow(row)}
+                                >
+                                  <Trash2 className="h-4 w-4 text-red-500" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                  
+                  {/* Pagination */}
+                  <div className="flex items-center justify-between mt-4">
+                    <p className="text-sm text-muted-foreground">
+                      Showing {((tableData.page - 1) * tableData.pageSize) + 1} to{' '}
+                      {Math.min(tableData.page * tableData.pageSize, tableData.total)} of{' '}
+                      {tableData.total} rows
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={tableData.page <= 1}
+                        onClick={() => handlePageChange(tableData.page - 1)}
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                        Previous
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={tableData.page >= tableData.totalPages}
+                        onClick={() => handlePageChange(tableData.page + 1)}
+                      >
+                        Next
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-12 text-muted-foreground">
+                  No data found in this table
                 </div>
-                <div className="p-2 bg-white dark:bg-slate-900 rounded">
-                  <span className="font-semibold">Wages</span>: Gross Wages
-                </div>
-                <div className="p-2 bg-white dark:bg-slate-900 rounded">
-                  <span className="font-semibold">EPF</span>: EPF Share
-                </div>
-                <div className="p-2 bg-white dark:bg-slate-900 rounded">
-                  <span className="font-semibold">EPS</span>: EPS Share
-                </div>
-              </div>
+              )}
             </CardContent>
           </Card>
         )}
       </main>
-
+      
+      {/* Edit Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {editMode === 'add' ? 'Add New Row' : 'Edit Row'}
+            </DialogTitle>
+            <DialogDescription>
+              {editMode === 'add' 
+                ? 'Enter values for the new row'
+                : 'Modify the row values below'}
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="space-y-4 py-4">
+            {tableSchema?.columns.map((col) => {
+              const isPrimaryKey = tableSchema.primaryKeys.includes(col.COLUMN_NAME);
+              return (
+                <div key={col.COLUMN_NAME}>
+                  <Label htmlFor={`edit-${col.COLUMN_NAME}`}>
+                    {col.COLUMN_NAME}
+                    {isPrimaryKey && <Badge variant="secondary" className="ml-2">PK</Badge>}
+                    <span className="text-xs text-muted-foreground ml-2">
+                      ({col.DATA_TYPE}{col.IS_NULLABLE === 'NO' ? ', NOT NULL' : ''})
+                    </span>
+                  </Label>
+                  <Input
+                    id={`edit-${col.COLUMN_NAME}`}
+                    value={editingRow[col.COLUMN_NAME]?.toString() || ''}
+                    onChange={(e) => setEditingRow({ 
+                      ...editingRow, 
+                      [col.COLUMN_NAME]: e.target.value 
+                    })}
+                    disabled={editMode === 'edit' && isPrimaryKey}
+                    placeholder={col.IS_NULLABLE === 'YES' ? 'NULL' : ''}
+                  />
+                </div>
+              );
+            })}
+          </div>
+          
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
+              <X className="h-4 w-4 mr-2" />
+              Cancel
+            </Button>
+            <Button onClick={saveRowChanges}>
+              <Save className="h-4 w-4 mr-2" />
+              {editMode === 'add' ? 'Insert' : 'Save Changes'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Migration Dialog */}
+      <Dialog open={migrationDialogOpen} onOpenChange={setMigrationDialogOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh]">
+          <DialogHeader>
+            <DialogTitle>Migrate MSSQL to MySQL</DialogTitle>
+            <DialogDescription>
+              Select tables to migrate from MSSQL to MySQL. Tables will be created automatically in MySQL.
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="space-y-4 py-4">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium">
+                {selectedTablesForMigration.length} of {mssqlTables.length} tables selected
+              </p>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={selectAllTables}>
+                  Select All
+                </Button>
+                <Button variant="outline" size="sm" onClick={deselectAllTables}>
+                  Deselect All
+                </Button>
+              </div>
+            </div>
+            
+            <ScrollArea className="h-64 border rounded-lg">
+              <div className="p-2 space-y-2">
+                {mssqlTables.map((table) => (
+                  <label
+                    key={table}
+                    className="flex items-center gap-3 p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded cursor-pointer"
+                  >
+                    <Checkbox
+                      checked={selectedTablesForMigration.includes(table)}
+                      onCheckedChange={() => toggleTableSelection(table)}
+                    />
+                    <Table2 className="h-4 w-4 text-blue-600" />
+                    <span>{table}</span>
+                  </label>
+                ))}
+              </div>
+            </ScrollArea>
+            
+            {migrationResults && (
+              <div className="border rounded-lg p-4 bg-slate-50 dark:bg-slate-800">
+                <h4 className="font-semibold mb-2">Migration Results</h4>
+                <ScrollArea className="h-48">
+                  <div className="space-y-2">
+                    {migrationResults.map((result) => (
+                      <div
+                        key={result.table}
+                        className={`flex items-center gap-2 p-2 rounded ${
+                          result.status === 'success' 
+                            ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' 
+                            : 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400'
+                        }`}
+                      >
+                        {result.status === 'success' ? (
+                          <CheckCircle2 className="h-4 w-4" />
+                        ) : (
+                          <XCircle className="h-4 w-4" />
+                        )}
+                        <span className="font-medium">{result.table}</span>
+                        {result.rowsMigrated !== undefined && (
+                          <span className="text-sm">({result.rowsMigrated} rows)</span>
+                        )}
+                        {result.error && (
+                          <span className="text-sm">- {result.error}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </ScrollArea>
+              </div>
+            )}
+          </div>
+          
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMigrationDialogOpen(false)}>
+              Close
+            </Button>
+            <Button
+              onClick={runMigration}
+              disabled={migrating || selectedTablesForMigration.length === 0}
+              className="bg-gradient-to-r from-blue-500 to-purple-600"
+            >
+              {migrating ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <ArrowRight className="h-4 w-4 mr-2" />
+              )}
+              Start Migration
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
       {/* Footer */}
       <footer className="mt-auto border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
           <p className="text-center text-sm text-slate-500 dark:text-slate-400">
-            EPFO ECR Maker - Upload ECR text files to get account-wise contribution summaries
+            Database Manager - View, edit, and migrate data between MSSQL and MySQL
           </p>
         </div>
       </footer>

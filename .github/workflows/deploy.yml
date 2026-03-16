@@ -1,0 +1,65 @@
+name: Build and Deploy to FTP
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build application
+        run: bun run build
+
+      - name: Create deployment package
+        run: |
+          mkdir -p deploy
+          cp -r .next/standalone/* deploy/
+          cp -r .next/static deploy/.next/
+          cp -r public deploy/
+          cp package.json deploy/
+          
+      - name: Create ecosystem.config.js for PM2
+        run: |
+          cat > deploy/ecosystem.config.js << 'EOF'
+          module.exports = {
+            apps: [{
+              name: 'mssql-manager',
+              script: 'server.js',
+              cwd: '/var/www/mssql-manager',
+              instances: 1,
+              autorestart: true,
+              watch: false,
+              max_memory_restart: '1G',
+              env: {
+                NODE_ENV: 'production',
+                PORT: 3000
+              }
+            }]
+          };
+          EOF
+
+      - name: Deploy to FTP
+        uses: SamKirkland/FTP-Deploy-Action@4.3.0
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USER }}
+          password: ${{ secrets.FTP_PASS }}
+          local-dir: ./deploy/
+          server-dir: ./
+          dangerous-clean-slate: true
